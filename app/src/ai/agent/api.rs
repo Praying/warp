@@ -2,6 +2,7 @@ pub(crate) mod convert_conversation;
 mod convert_from;
 mod convert_to;
 mod r#impl;
+mod local_engine;
 
 use std::collections::HashSet;
 use std::path::Path;
