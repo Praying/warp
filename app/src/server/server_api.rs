@@ -445,6 +445,12 @@ pub struct ServerApi {
 }
 
 impl ServerApi {
+    /// Returns whether the current session is the account-free local session,
+    /// whose requests warp-server would reject as unauthenticated.
+    pub fn using_local_credentials(&self) -> bool {
+        self.base_client.using_local_credentials()
+    }
+
     fn new(
         auth_state: Arc<AuthState>,
         event_sender: async_channel::Sender<AuthEvent>,

@@ -250,6 +250,11 @@ impl BaseClient {
         self.auth_state.user_id()
     }
 
+    /// Returns whether the current session is the account-free local session.
+    pub fn using_local_credentials(&self) -> bool {
+        self.auth_state.using_local_credentials()
+    }
+
     /// Returns whether the authenticated principal is a service account.
     pub fn is_service_account(&self) -> bool {
         self.auth_state.is_service_account()
