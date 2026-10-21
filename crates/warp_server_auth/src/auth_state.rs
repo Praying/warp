@@ -115,6 +115,7 @@ impl AuthState {
     /// 1. Test user (test/integration/skip_login builds)
     /// 2. WARP_USER_SECRET environment variable
     /// 3. Persisted user from secure storage
+    /// 4. Account-free local user
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub fn initialize(ctx: &AppContext) -> Self {
         let state = Self::new(ctx);
@@ -156,6 +157,14 @@ impl AuthState {
             Err(err) => {
                 log::info!("Unable to read user from secure storage: {err:?}");
             }
+        }
+
+        // Fall back to an account-free local session so the app is fully usable
+        // without logging in; server-backed features stay unavailable until a
+        // real login replaces these credentials.
+        if state.user.read().is_none() {
+            state.set_user(Some(User::local()));
+            state.set_credentials(Some(Credentials::Local));
         }
 
         state
@@ -223,6 +232,7 @@ impl AuthState {
             (Some(_), Some(Credentials::ApiKey { .. })) => PersistAction::DoNothing,
             (Some(_), Some(Credentials::Bearer(_))) => PersistAction::DoNothing,
             (Some(_), Some(Credentials::SessionCookie)) => PersistAction::DoNothing,
+            (Some(_), Some(Credentials::Local)) => PersistAction::DoNothing,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             (Some(_), Some(Credentials::Test)) => PersistAction::DoNothing,
             // Credentials without a user, or user without credentials - transient states
@@ -346,6 +356,18 @@ impl AuthState {
     /// Determines whether the user should be considered as logged in.
     pub fn is_logged_in(&self) -> bool {
         self.credentials.read().is_some()
+    }
+
+    /// Returns whether the current session is the account-free local session.
+    pub fn using_local_credentials(&self) -> bool {
+        matches!(self.credentials.read().as_ref(), Some(Credentials::Local))
+    }
+
+    /// Returns whether the user holds credentials that warp-server recognizes.
+    /// False for the account-free local session, whose requests can only ever
+    /// be rejected by the server.
+    pub fn is_logged_in_with_server_credentials(&self) -> bool {
+        self.is_logged_in() && !self.using_local_credentials()
     }
 
     /// Returns whether the user should be treated as not having a full account.

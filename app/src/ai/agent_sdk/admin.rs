@@ -15,7 +15,11 @@ use crate::workspaces::workspace::Workspace;
 /// Kick off a device authorization login flow and handle auth events.
 pub fn login(ctx: &mut AppContext) -> Result<()> {
     let auth_state = AuthStateProvider::as_ref(ctx).get();
-    let has_cached_credentials = auth_state.is_logged_in();
+    // Local and other token-less credentials cannot be refreshed, so start
+    // device auth directly instead of waiting for a refresh that never comes.
+    let has_cached_credentials = auth_state
+        .credentials()
+        .is_some_and(|credentials| credentials.login_token().is_some());
 
     // If the user is already logged in, we require that the user log out before logging
     // back in to ensure their existing state isn't replaced (especially if using both the CLI
@@ -261,7 +265,7 @@ pub fn whoami(ctx: &mut AppContext, output_format: OutputFormat) -> Result<()> {
 /// Log out of Warp using the same logic as the app.
 pub fn logout(ctx: &mut AppContext) -> Result<()> {
     let auth_state = AuthStateProvider::as_ref(ctx).get();
-    if !auth_state.is_logged_in() {
+    if auth_state.using_local_credentials() || !auth_state.is_logged_in() {
         println!("You are not logged in.");
         ctx.terminate_app(TerminationMode::ForceTerminate, None);
         return Ok(());

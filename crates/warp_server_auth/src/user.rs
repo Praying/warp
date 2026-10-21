@@ -5,7 +5,7 @@ use warp_graphql::queries::get_user::FirebaseProfile;
 use warp_graphql::scalars::time::ServerTimestamp;
 
 use super::UserUid;
-pub use super::user_uid::{TEST_USER_EMAIL, TEST_USER_UID};
+pub use super::user_uid::{LOCAL_USER_UID, TEST_USER_EMAIL, TEST_USER_UID};
 
 pub mod persistence;
 
@@ -176,6 +176,27 @@ impl User {
             metadata: UserMetadata {
                 email: TEST_USER_EMAIL.to_string(),
                 display_name: None,
+                photo_url: None,
+            },
+            is_onboarded: true,
+            needs_sso_link: false,
+            anonymous_user_type: None,
+            is_on_work_domain: false,
+            linked_at: None,
+            personal_object_limits: None,
+            principal_type: PrincipalType::User,
+            global_skills: Vec::new(),
+        }
+    }
+
+    /// The account-free user installed when no real credentials exist. Not
+    /// anonymous, so login-gated features treat it as a full local session.
+    pub fn local() -> Self {
+        Self {
+            local_id: UserUid::new(LOCAL_USER_UID),
+            metadata: UserMetadata {
+                email: String::new(),
+                display_name: Some("Local User".to_owned()),
                 photo_url: None,
             },
             is_onboarded: true,

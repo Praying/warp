@@ -41,3 +41,12 @@ fn test_parse_user_profile() -> Result<()> {
 fn test_user_global_skills_defaults_to_empty() {
     assert_eq!(User::test().global_skills, Vec::<String>::new());
 }
+
+#[test]
+fn local_user_is_a_full_non_anonymous_session() {
+    let user = User::local();
+    assert!(!user.is_user_anonymous());
+    assert!(user.is_onboarded);
+    assert!(!user.needs_sso_link);
+    assert_eq!(user.username_for_display(), "Local User");
+}
