@@ -2139,11 +2139,11 @@ enum CommandAuthentication {
 
 fn command_authentication(
     pending_api_key: Option<String>,
-    is_logged_in: bool,
+    can_refresh_user: bool,
 ) -> Option<CommandAuthentication> {
     match pending_api_key {
         Some(api_key) => Some(CommandAuthentication::PendingApiKey(api_key)),
-        None if is_logged_in => Some(CommandAuthentication::RefreshUser),
+        None if can_refresh_user => Some(CommandAuthentication::RefreshUser),
         None => None,
     }
 }
@@ -2223,8 +2223,13 @@ fn launch_command(
     let cli_name = warp_cli::binary_name().unwrap_or_else(|| "warp".to_string());
 
     let auth_state = AuthStateProvider::handle(ctx).as_ref(ctx).get();
+    // Local and other token-less credentials cannot refresh a user, so waiting
+    // for an auth event would hang; treat them as logged out.
+    let can_refresh_user = auth_state
+        .credentials()
+        .is_some_and(|credentials| credentials.login_token().is_some());
     let Some(authentication) =
-        command_authentication(global_options.api_key.clone(), auth_state.is_logged_in())
+        command_authentication(global_options.api_key.clone(), can_refresh_user)
     else {
         return Err(anyhow::anyhow!(
             "You are not logged in - please log in with `{cli_name} login` to continue."

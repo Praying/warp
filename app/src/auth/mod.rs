@@ -117,6 +117,12 @@ pub fn web_logout_url_with_continue(continue_url: &str) -> Option<String> {
 /// If the app has running processes or dirty objects, we'll show a confirmation modal before logging out.
 /// If the user aborts, the user will not be logged out.
 pub fn maybe_log_out(app: &mut AppContext) {
+    if AuthStateProvider::as_ref(app)
+        .get()
+        .using_local_credentials()
+    {
+        return;
+    }
     send_telemetry_sync_from_app_ctx!(TelemetryEvent::UserInitiatedLogOut, app);
 
     let sessions = SessionNavigationData::all_sessions(app).collect_vec();
@@ -270,7 +276,15 @@ pub fn log_out_and_open_web(app: &mut AppContext) {
 }
 
 // Log out the user, clears workspace state, stops running processes, and deletes database.
+// No-op for the account-free local session: logging out would destroy that
+// session's local data with no account to fall back to.
 pub fn log_out(app: &mut AppContext) {
+    if AuthStateProvider::as_ref(app)
+        .get()
+        .using_local_credentials()
+    {
+        return;
+    }
     send_telemetry_sync_from_app_ctx!(TelemetryEvent::LogOut, app);
 
     CodebaseIndexManager::handle(app).update(app, |index_manager, ctx| {
