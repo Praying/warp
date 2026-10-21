@@ -165,7 +165,10 @@ impl TeamUpdateManager {
         ctx: &mut ModelContext<Self>,
     ) -> Receiver<Result<()>> {
         // Skip the refresh when logged out to avoid noisy auth errors.
-        if !AuthStateProvider::as_ref(ctx).get().is_logged_in() {
+        if !AuthStateProvider::as_ref(ctx)
+            .get()
+            .is_logged_in_with_server_credentials()
+        {
             let (tx, rx) = oneshot::channel::<Result<()>>();
             let _ = tx.send(Ok(()));
             return rx;
@@ -187,7 +190,7 @@ impl TeamUpdateManager {
     ) -> impl Spawnable<Output = Result<()>> + use<> {
         let team_client = AuthStateProvider::as_ref(ctx)
             .get()
-            .is_logged_in()
+            .is_logged_in_with_server_credentials()
             .then(|| self.team_client.clone());
         let foreground = ctx.spawner();
 
@@ -282,7 +285,10 @@ impl TeamUpdateManager {
 
         // Don't poll when the user is logged out to avoid spamming auth errors in the logs.
         // Polling will be restarted when the user logs in via `initiate_data_pollers`.
-        if !AuthStateProvider::as_ref(ctx).get().is_logged_in() {
+        if !AuthStateProvider::as_ref(ctx)
+            .get()
+            .is_logged_in_with_server_credentials()
+        {
             self.should_poll_for_workspace_metadata_updates = false;
             return;
         }

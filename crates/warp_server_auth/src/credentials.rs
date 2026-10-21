@@ -12,6 +12,10 @@ use warp_graphql::object_permissions::OwnerType;
 
 use super::user::FirebaseAuthTokens;
 
+#[cfg(test)]
+#[path = "credentials_tests.rs"]
+mod tests;
+
 /// Represents the different ways a user can authenticate with Warp.
 #[derive(Clone, Debug)]
 pub enum Credentials {
@@ -27,6 +31,9 @@ pub enum Credentials {
     Bearer(String),
     /// Authentication derived from an ambient browser session cookie.
     SessionCookie,
+    /// Account-free local session. Requests are sent unauthenticated; a real
+    /// login replaces these credentials.
+    Local,
     /// Test credentials used in unit tests, integration tests, and skip_login builds.
     #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
     Test,
@@ -40,6 +47,7 @@ impl Credentials {
             Credentials::ApiKey { .. } => None,
             Credentials::Bearer(_) => None,
             Credentials::SessionCookie => None,
+            Credentials::Local => None,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             Credentials::Test => None,
         }
@@ -52,6 +60,7 @@ impl Credentials {
             Credentials::Firebase(_) => None,
             Credentials::Bearer(_) => None,
             Credentials::SessionCookie => None,
+            Credentials::Local => None,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             Credentials::Test => None,
         }
@@ -64,6 +73,7 @@ impl Credentials {
             Credentials::Firebase(_) => None,
             Credentials::Bearer(_) => None,
             Credentials::SessionCookie => None,
+            Credentials::Local => None,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             Credentials::Test => None,
         }
@@ -76,6 +86,7 @@ impl Credentials {
             Credentials::ApiKey { .. } => None,
             Credentials::Bearer(_) => None,
             Credentials::SessionCookie => None,
+            Credentials::Local => None,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             Credentials::Test => None,
         }
@@ -87,7 +98,7 @@ impl Credentials {
             Credentials::Firebase(tokens) => AuthToken::Firebase(tokens.id_token.clone()),
             Credentials::ApiKey { key, .. } => AuthToken::ApiKey(key.clone()),
             Credentials::Bearer(token) => AuthToken::Bearer(token.clone()),
-            Credentials::SessionCookie => AuthToken::NoAuth,
+            Credentials::SessionCookie | Credentials::Local => AuthToken::NoAuth,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             Credentials::Test => AuthToken::NoAuth,
         }
@@ -97,9 +108,10 @@ impl Credentials {
     pub fn is_externally_managed(&self) -> bool {
         match self {
             Credentials::Bearer(_) => true,
-            Credentials::Firebase(_) | Credentials::ApiKey { .. } | Credentials::SessionCookie => {
-                false
-            }
+            Credentials::Firebase(_)
+            | Credentials::ApiKey { .. }
+            | Credentials::SessionCookie
+            | Credentials::Local => false,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             Credentials::Test => false,
         }
@@ -114,6 +126,7 @@ impl Credentials {
             Credentials::ApiKey { key, .. } => Some(LoginToken::ApiKey(key.clone())),
             Credentials::Bearer(_) => None,
             Credentials::SessionCookie => Some(LoginToken::SessionCookie),
+            Credentials::Local => None,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             Credentials::Test => None,
         }

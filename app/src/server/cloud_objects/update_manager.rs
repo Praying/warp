@@ -685,7 +685,10 @@ impl UpdateManager {
 
         // Don't poll when the user is logged out to avoid spamming auth errors in the logs.
         // Polling will be restarted when the user logs in via `initiate_data_pollers`.
-        if !AuthStateProvider::as_ref(ctx).get().is_logged_in() {
+        if !AuthStateProvider::as_ref(ctx)
+            .get()
+            .is_logged_in_with_server_credentials()
+        {
             self.should_poll_for_updated_objects = false;
             return;
         }
