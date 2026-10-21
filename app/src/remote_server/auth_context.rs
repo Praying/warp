@@ -46,7 +46,8 @@ pub fn server_api_auth_context(
 }
 
 fn use_authenticated_user_identity(auth_state: &AuthState) -> bool {
-    auth_state.is_logged_in() && !auth_state.is_user_anonymous().unwrap_or(true)
+    auth_state.is_logged_in_with_server_credentials()
+        && !auth_state.is_user_anonymous().unwrap_or(true)
 }
 
 fn remote_server_identity_key(auth_state: &AuthState) -> String {

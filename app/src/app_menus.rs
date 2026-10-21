@@ -233,12 +233,11 @@ fn make_new_app_menu(ctx: &AppContext) -> Menu {
         "Log out",
         auth::maybe_log_out,
         move |_, ctx| {
-            let is_anonymous = AuthStateProvider::handle(ctx)
-                .as_ref(ctx)
-                .get()
-                .is_anonymous_or_logged_out();
+            let auth_state = AuthStateProvider::handle(ctx).as_ref(ctx).get();
             MenuItemPropertyChanges {
-                disabled: Some(is_anonymous),
+                disabled: Some(
+                    auth_state.is_anonymous_or_logged_out() || auth_state.using_local_credentials(),
+                ),
                 ..Default::default()
             }
         },

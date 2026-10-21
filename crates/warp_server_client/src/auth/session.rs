@@ -257,7 +257,7 @@ impl AuthSession {
                     self.refresh_firebase_access_token().await
                 }
             }
-            Credentials::SessionCookie => Ok(AuthToken::NoAuth),
+            Credentials::SessionCookie | Credentials::Local => Ok(AuthToken::NoAuth),
             #[cfg(any(feature = "integration_tests", feature = "skip_login"))]
             Credentials::Test => Ok(AuthToken::NoAuth),
         }
@@ -313,11 +313,14 @@ impl AuthSession {
         let current_refresh_token = match self.auth_state.credentials() {
             Some(Credentials::Firebase(tokens)) => Some(tokens.refresh_token),
             Some(
-                Credentials::ApiKey { .. } | Credentials::Bearer(_) | Credentials::SessionCookie,
-            )
-            | None => None,
+                Credentials::ApiKey { .. }
+                | Credentials::Bearer(_)
+                | Credentials::SessionCookie
+                | Credentials::Local,
+            ) => None,
             #[cfg(any(feature = "integration_tests", feature = "skip_login"))]
             Some(Credentials::Test) => None,
+            None => None,
         };
         if current_refresh_token.as_deref() != Some(&refresh_token) {
             bail!("Firebase credentials changed while refreshing the access token");
