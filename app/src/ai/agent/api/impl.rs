@@ -6,7 +6,7 @@ use warp_core::features::FeatureFlag;
 use warp_multi_agent_api as api;
 
 use super::convert_to::convert_input;
-use super::{ConvertToAPITypeError, RequestParams, ResponseStream};
+use super::{ConvertToAPITypeError, RequestParams, ResponseStream, local_engine};
 use crate::ai::agent::redaction;
 use crate::ai::blocklist::video_recording_enabled;
 use crate::server::server_api::{AIApiError, ServerApi};
@@ -148,6 +148,15 @@ pub async fn generate_multi_agent_output(
             .map(|suggestions| suggestions.into()),
         mcp_context: params.mcp_context.map(Into::into),
     };
+
+    // The account-free local session has no server identity, so the MAA
+    // request would fail authentication; run the agent loop locally against
+    // the user's own model instead.
+    if server_api.as_ref().using_local_credentials() {
+        let output_stream =
+            local_engine::generate_local_multi_agent_output(&request).take_until(cancellation_rx);
+        return Ok(Box::pin(output_stream));
+    }
 
     let response_stream = warp_multi_agent_client::generate_multi_agent_output(
         server_api.as_ref(),
