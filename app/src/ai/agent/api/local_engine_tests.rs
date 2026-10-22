@@ -95,7 +95,7 @@ fn falls_back_to_byo_anthropic_key() {
 #[test]
 fn no_local_model_yields_actionable_error_event() {
     let request = custom_provider_request("some-warp-hosted-model");
-    let stream = generate_local_multi_agent_output(&request);
+    let stream = generate_local_multi_agent_output(&request, None);
     let mut stream = futures::executor::block_on_stream(stream);
     let event = stream.next().unwrap().unwrap();
     drop(stream);
@@ -112,7 +112,7 @@ fn no_local_model_yields_actionable_error_event() {
 #[test]
 fn stream_opens_with_init_task_and_user_query_echo() {
     let request = custom_provider_request("custom-llama");
-    let stream = generate_local_multi_agent_output(&request);
+    let stream = generate_local_multi_agent_output(&request, None);
     let mut stream = futures::executor::block_on_stream(stream);
     let init = stream.next().unwrap().unwrap();
     assert!(matches!(
@@ -189,7 +189,7 @@ fn chat_history_flattens_messages_and_new_input() {
     let input = request.input.as_ref().unwrap();
     let history = build_chat_history(&[task], input);
     assert_eq!(history.len(), 5);
-    assert!(matches!(&history[0], ChatMessage::User(query) if query == "list the files"));
+    assert!(matches!(&history[0], ChatMessage::User { text, .. } if text == "list the files"));
     assert!(
         matches!(&history[1], ChatMessage::AssistantToolCalls(calls) if calls.len() == 1
         && calls[0].name == "run_shell_command")
@@ -200,7 +200,7 @@ fn chat_history_flattens_messages_and_new_input() {
     );
     assert!(matches!(&history[3], ChatMessage::Assistant(text) if text == "There is one file."));
     // The request's new user query is appended for the model to answer.
-    assert!(matches!(&history[4], ChatMessage::User(query) if query == "hello"));
+    assert!(matches!(&history[4], ChatMessage::User { text, .. } if text == "hello"));
 }
 
 fn message(kind: api::message::Message) -> api::Message {
@@ -263,7 +263,7 @@ fn streams_completion_from_an_openai_compatible_endpoint() {
     });
 
     let events: Vec<_> = futures::executor::block_on(async {
-        generate_local_multi_agent_output(&request)
+        generate_local_multi_agent_output(&request, None)
             .then(|event| async move { event })
             .collect()
             .await
@@ -356,7 +356,7 @@ fn streams_completion_from_an_anthropic_endpoint() {
 
     let request = anthropic_request(&format!("http://127.0.0.1:{port}"));
     let events: Vec<_> = futures::executor::block_on(async {
-        generate_local_multi_agent_output(&request)
+        generate_local_multi_agent_output(&request, None)
             .then(|event| async move { event })
             .collect()
             .await
@@ -408,4 +408,109 @@ fn anthropic_request(base_url: &str) -> api::Request {
             }],
         });
     request
+}
+
+#[test]
+fn custom_model_settings_reach_the_streaming_request() {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = vec![0u8; 16384];
+        let read = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..read]).to_string();
+        let body = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        stream.write_all(body.as_bytes()).unwrap();
+        request
+    });
+
+    let request = anthropic_request(&format!("http://127.0.0.1:{port}"));
+    let custom_model = ai::api_keys::CustomEndpointModel {
+        name: "claude-mock".to_owned(),
+        alias: None,
+        config_key: "custom-mock".to_owned(),
+        context_window: Some(200_000),
+        max_output_tokens: Some(4096),
+        reasoning_effort: Some("high".to_owned()),
+        supports_images: true,
+    };
+    let events: Vec<_> = futures::executor::block_on(async {
+        generate_local_multi_agent_output(&request, Some(&custom_model))
+            .then(|event| async move { event })
+            .collect()
+            .await
+    });
+    let received_request = server.join().unwrap();
+
+    // The configured settings reach the wire: the output cap and the
+    // thinking budget derived from "high", clamped below max_tokens.
+    assert!(
+        received_request.contains("POST /v1/messages"),
+        "{received_request}"
+    );
+    assert!(
+        received_request.contains("\"max_tokens\":4096"),
+        "{received_request}"
+    );
+    assert!(
+        received_request.contains("\"budget_tokens\":3072"),
+        "{received_request}"
+    );
+    assert!(!events.is_empty());
+}
+
+#[test]
+fn truncate_history_drops_oldest_and_avoids_orphan_tool_results() {
+    let mut messages = vec![
+        ChatMessage::user("first question"),
+        ChatMessage::assistant_tool_calls(vec![ToolCallRequest {
+            id: "call-1".to_owned(),
+            name: "run_shell_command".to_owned(),
+            arguments: serde_json::json!({"command": "echo a really long output that takes many tokens to represent"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        }]),
+        ChatMessage::tool_result("call-1", "a really long output ".repeat(50)),
+        ChatMessage::user("second question"),
+    ];
+    truncate_history(&mut messages, 64);
+    // The oldest exchange is dropped; the remaining suffix starts with a
+    // user message, not an orphan tool result.
+    assert!(matches!(&messages[0], ChatMessage::User { text, .. } if text == "second question"));
+    assert_eq!(messages.len(), 1);
+}
+
+#[test]
+fn truncate_history_keeps_everything_when_it_fits() {
+    let mut messages = vec![ChatMessage::user("hello"), ChatMessage::assistant("hi")];
+    truncate_history(&mut messages, 100_000);
+    assert_eq!(messages.len(), 2);
+}
+
+#[test]
+fn attach_input_images_targets_the_last_user_message() {
+    let image = || api::input_context::Image {
+        data: b"aGVsbG8=".to_vec(),
+        mime_type: "image/png".to_owned(),
+    };
+    let mut input = custom_provider_request("custom-llama").input.unwrap();
+    input.context = Some(api::InputContext {
+        images: vec![image(), image()],
+        ..Default::default()
+    });
+    let mut messages = vec![
+        ChatMessage::user("earlier"),
+        ChatMessage::assistant("answer"),
+        ChatMessage::user("what is in these?"),
+    ];
+    attach_input_images(&mut messages, &input);
+    match &messages[2] {
+        ChatMessage::User { images, .. } => assert_eq!(images.len(), 2),
+        _ => panic!("expected a user message"),
+    }
+    assert!(matches!(&messages[0], ChatMessage::User { images, .. } if images.is_empty()));
 }

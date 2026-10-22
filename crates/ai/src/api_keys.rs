@@ -418,6 +418,20 @@ pub struct CustomEndpointModel {
     /// as the `CustomModelProviders.providers[*].models[*].config_key` on the request wire.
     /// Generated as a UUIDv4 at model creation.
     pub config_key: String,
+    /// Total context window in tokens, used to bound the conversation history
+    /// sent to the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    /// Maximum output tokens per request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    /// Provider reasoning effort (`low` | `medium` | `high`), forwarded
+    /// unchanged to schemas that support it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Whether the model accepts image attachments.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub supports_images: bool,
 }
 
 impl CustomEndpointModel {
@@ -612,8 +626,37 @@ pub struct CustomEndpointParams {
     pub name: String,
     pub url: String,
     pub api_key: String,
-    pub models: Vec<(String, Option<String>, Option<String>)>,
+    pub models: Vec<CustomModelParams>,
     pub schema: CustomEndpointSchema,
+}
+
+/// What a UI collects for one custom model on an endpoint.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CustomModelParams {
+    pub name: String,
+    pub alias: Option<String>,
+    pub config_key: Option<String>,
+    pub context_window: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+    pub reasoning_effort: Option<String>,
+    pub supports_images: bool,
+}
+
+impl CustomModelParams {
+    pub fn into_model(self) -> CustomEndpointModel {
+        CustomEndpointModel {
+            name: self.name,
+            alias: self.alias,
+            config_key: self
+                .config_key
+                .filter(|key| !key.trim().is_empty())
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            context_window: self.context_window,
+            max_output_tokens: self.max_output_tokens,
+            reasoning_effort: self.reasoning_effort,
+            supports_images: self.supports_images,
+        }
+    }
 }
 fn provider_credential_action(is_present: bool) -> ProviderCredentialTelemetryAction {
     if is_present {
@@ -709,6 +752,16 @@ impl ApiKeyManager {
             .get(id)
             .map(String::as_str)
             .filter(|key| !key.trim().is_empty())
+    }
+
+    /// Returns the configured model whose config key matches `model_id`, if
+    /// the selection points at a custom endpoint model.
+    pub fn custom_endpoint_model(&self, model_id: &str) -> Option<&CustomEndpointModel> {
+        self.custom_endpoints
+            .resolved
+            .iter()
+            .flat_map(|endpoint| endpoint.models.iter())
+            .find(|model| model.config_key == model_id)
     }
 
     pub fn set_custom_endpoint_definitions(
@@ -1006,13 +1059,7 @@ impl ApiKeyManager {
             schema,
             models: models
                 .into_iter()
-                .map(|(name, alias, config_key)| CustomEndpointModel {
-                    name,
-                    alias,
-                    config_key: config_key
-                        .filter(|k| !k.is_empty())
-                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                })
+                .map(CustomModelParams::into_model)
                 .collect(),
         });
         if self.custom_endpoints.definitions.is_none() {
@@ -1045,13 +1092,7 @@ impl ApiKeyManager {
             schema,
             models: models
                 .into_iter()
-                .map(|(name, alias, config_key)| CustomEndpointModel {
-                    name,
-                    alias,
-                    config_key: config_key
-                        .filter(|k| !k.is_empty())
-                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                })
+                .map(CustomModelParams::into_model)
                 .collect(),
         };
         if self.custom_endpoints.definitions.is_none() {
@@ -1148,7 +1189,11 @@ impl ApiKeyManager {
                             |m| api::request::settings::custom_model_providers::CustomModel {
                                 slug: m.name.clone(),
                                 config_key: m.config_key.clone(),
-                                reasoning_effort: String::new(),
+                                reasoning_effort: m
+                                    .reasoning_effort
+                                    .as_deref()
+                                    .unwrap_or_default()
+                                    .to_owned(),
                             },
                         )
                         .collect(),

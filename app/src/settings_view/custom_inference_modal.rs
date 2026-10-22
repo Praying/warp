@@ -1,4 +1,6 @@
-use ::ai::api_keys::{CustomEndpoint, CustomEndpointSchema, validate_custom_endpoint_url};
+use ::ai::api_keys::{
+    CustomEndpoint, CustomEndpointSchema, CustomModelParams, validate_custom_endpoint_url,
+};
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
     Border, ChildView, ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox, Container,
@@ -9,6 +11,7 @@ use warpui::elements::{
 use warpui::fonts::FamilyId;
 use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
+use warpui::ui_components::switch::SwitchStateHandle;
 use warpui::units::Pixels;
 use warpui::{
     AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
@@ -42,6 +45,7 @@ const MODAL_SCROLLBAR_WIDTH: f32 = 4.;
 // which have no scrollbar.
 const SCROLL_CONTENT_RIGHT_MARGIN: f32 = 24. + MODAL_SCROLLBAR_WIDTH;
 const MODEL_INPUT_WIDTH: f32 = (INPUT_WIDTH - MODEL_ROW_SPACING) / 2.;
+const MODEL_SETTING_INPUT_WIDTH: f32 = (INPUT_WIDTH - 3. * MODEL_ROW_SPACING) / 4.;
 fn model_row_scroll_position_id(index: usize) -> String {
     format!("custom_endpoint_model_row_{index}")
 }
@@ -54,7 +58,7 @@ pub enum CustomEndpointModalEvent {
         url: String,
         api_key: String,
         schema: CustomEndpointSchema,
-        models: Vec<(String, Option<String>, Option<String>)>,
+        models: Vec<CustomModelParams>,
     },
     SaveEndpoint {
         index: usize,
@@ -62,7 +66,7 @@ pub enum CustomEndpointModalEvent {
         url: String,
         api_key: String,
         schema: CustomEndpointSchema,
-        models: Vec<(String, Option<String>, Option<String>)>,
+        models: Vec<CustomModelParams>,
     },
     RemoveEndpoint {
         index: usize,
@@ -77,11 +81,19 @@ pub enum CustomEndpointModalAction {
     RemoveModel(usize),
     RemoveEndpoint,
     SetSchema(CustomEndpointSchema),
+    SetReasoningEffort(usize, Option<&'static str>),
+    ToggleModelImages(usize),
 }
 
 struct ModelRow {
     name_editor: ViewHandle<EditorView>,
     alias_editor: ViewHandle<EditorView>,
+    context_window_editor: ViewHandle<EditorView>,
+    max_output_editor: ViewHandle<EditorView>,
+    reasoning_effort_dropdown: ViewHandle<Dropdown<CustomEndpointModalAction>>,
+    images_switch_state: SwitchStateHandle,
+    reasoning_effort: Option<&'static str>,
+    supports_images: bool,
     remove_mouse_state: MouseStateHandle,
     config_key: Option<String>,
 }
@@ -215,10 +227,11 @@ impl CustomEndpointModal {
         let mut model_rows = Vec::new();
         if let Some(ep) = endpoint {
             for model in &ep.models {
-                model_rows.push(Self::create_model_row(
-                    Some(&model.name),
-                    model.alias.as_deref(),
+                let row_index = model_rows.len();
+                model_rows.push(Self::create_model_row_at(
+                    Some(model),
                     Some(model.config_key.clone()),
+                    row_index,
                     font_family,
                     &text_colors,
                     ctx,
@@ -226,10 +239,10 @@ impl CustomEndpointModal {
             }
         }
         if model_rows.is_empty() {
-            model_rows.push(Self::create_model_row(
+            model_rows.push(Self::create_model_row_at(
                 None,
                 None,
-                None,
+                0,
                 font_family,
                 &text_colors,
                 ctx,
@@ -249,13 +262,20 @@ impl CustomEndpointModal {
             me.handle_api_key_event(event, ctx);
         });
         for row in &model_rows {
-            let name_editor = row.name_editor.clone();
-            ctx.subscribe_to_view(&name_editor, |me, editor, event, ctx| {
-                me.handle_model_editor_event(&editor, event, ctx);
-            });
-            let alias_editor = row.alias_editor.clone();
-            ctx.subscribe_to_view(&alias_editor, |me, editor, event, ctx| {
-                me.handle_model_editor_event(&editor, event, ctx);
+            for editor in [
+                &row.name_editor,
+                &row.alias_editor,
+                &row.context_window_editor,
+                &row.max_output_editor,
+            ] {
+                let editor = editor.clone();
+                ctx.subscribe_to_view(&editor, |me, editor, event, ctx| {
+                    me.handle_model_editor_event(&editor, event, ctx);
+                });
+            }
+            let dropdown = row.reasoning_effort_dropdown.clone();
+            ctx.subscribe_to_view(&dropdown, |_, _, event, ctx| match event {
+                DropdownEvent::ToggleExpanded | DropdownEvent::Close => ctx.notify(),
             });
         }
         let remove_endpoint_button = ctx.add_typed_action_view(|_| {
@@ -283,14 +303,16 @@ impl CustomEndpointModal {
         }
     }
 
-    fn create_model_row(
-        name: Option<&str>,
-        alias: Option<&str>,
+    fn create_model_row_at(
+        model: Option<&::ai::api_keys::CustomEndpointModel>,
         config_key: Option<String>,
+        row_index: usize,
         font_family: FamilyId,
         text_colors: &crate::editor::TextColors,
         ctx: &mut ViewContext<Self>,
     ) -> ModelRow {
+        let name = model.map(|model| model.name.as_str());
+        let alias = model.and_then(|model| model.alias.as_deref());
         let tc = text_colors.clone();
         let name_editor = ctx.add_typed_action_view(move |ctx| {
             let options = SingleLineEditorOptions {
@@ -331,9 +353,69 @@ impl CustomEndpointModal {
             editor
         });
 
+        let numeric_editor =
+            |placeholder: &'static str, value: Option<u32>, ctx: &mut ViewContext<Self>| {
+                let tc = text_colors.clone();
+                ctx.add_typed_action_view(move |ctx| {
+                    let options = SingleLineEditorOptions {
+                        text: TextOptions {
+                            font_family_override: Some(font_family),
+                            text_colors_override: Some(tc.clone()),
+                            ..Default::default()
+                        },
+                        propagate_and_no_op_vertical_navigation_keys:
+                            PropagateAndNoOpNavigationKeys::Always,
+                        ..Default::default()
+                    };
+                    let mut editor = EditorView::single_line(options, ctx);
+                    editor.set_placeholder_text(placeholder, ctx);
+                    if let Some(value) = value {
+                        editor.set_buffer_text(&value.to_string(), ctx);
+                    }
+                    editor
+                })
+            };
+        let context_window_editor = numeric_editor(
+            "e.g., 128000",
+            model.and_then(|model| model.context_window),
+            ctx,
+        );
+        let max_output_editor = numeric_editor(
+            "e.g., 8192",
+            model.and_then(|model| model.max_output_tokens),
+            ctx,
+        );
+
+        let reasoning_effort = model
+            .and_then(|model| model.reasoning_effort.as_deref())
+            .and_then(effort_from_str);
+        let reasoning_effort_dropdown = ctx.add_typed_action_view(move |ctx| {
+            let mut dropdown = Dropdown::new(ctx);
+            dropdown.set_render_popup_externally(true, ctx);
+            dropdown.set_items(
+                [None, Some("low"), Some("medium"), Some("high")]
+                    .into_iter()
+                    .map(|effort| {
+                        DropdownItem::new(
+                            effort_label(effort),
+                            CustomEndpointModalAction::SetReasoningEffort(row_index, effort),
+                        )
+                    })
+                    .collect(),
+                ctx,
+            );
+            dropdown
+        });
+
         ModelRow {
             name_editor,
             alias_editor,
+            context_window_editor,
+            max_output_editor,
+            reasoning_effort_dropdown,
+            images_switch_state: Default::default(),
+            reasoning_effort,
+            supports_images: model.is_some_and(|model| model.supports_images),
             remove_mouse_state: Default::default(),
             config_key,
         }
@@ -375,10 +457,11 @@ impl CustomEndpointModal {
         let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
         if let Some(ep) = endpoint {
             for model in &ep.models {
-                self.model_rows.push(Self::create_model_row(
-                    Some(&model.name),
-                    model.alias.as_deref(),
+                let row_index = self.model_rows.len();
+                self.model_rows.push(Self::create_model_row_at(
+                    Some(model),
                     Some(model.config_key.clone()),
+                    row_index,
                     font_family,
                     &text_colors,
                     ctx,
@@ -386,23 +469,34 @@ impl CustomEndpointModal {
             }
         }
         if self.model_rows.is_empty() {
-            self.model_rows.push(Self::create_model_row(
+            self.model_rows.push(Self::create_model_row_at(
                 None,
                 None,
-                None,
+                0,
                 font_family,
                 &text_colors,
                 ctx,
             ));
         }
+        self.subscribe_to_model_rows(ctx);
+    }
+
+    fn subscribe_to_model_rows(&mut self, ctx: &mut ViewContext<Self>) {
         for row in &self.model_rows {
-            let name_editor = row.name_editor.clone();
-            ctx.subscribe_to_view(&name_editor, |me, editor, event, ctx| {
-                me.handle_model_editor_event(&editor, event, ctx);
-            });
-            let alias_editor = row.alias_editor.clone();
-            ctx.subscribe_to_view(&alias_editor, |me, editor, event, ctx| {
-                me.handle_model_editor_event(&editor, event, ctx);
+            for editor in [
+                &row.name_editor,
+                &row.alias_editor,
+                &row.context_window_editor,
+                &row.max_output_editor,
+            ] {
+                let editor = editor.clone();
+                ctx.subscribe_to_view(&editor, |me, editor, event, ctx| {
+                    me.handle_model_editor_event(&editor, event, ctx);
+                });
+            }
+            let dropdown = row.reasoning_effort_dropdown.clone();
+            ctx.subscribe_to_view(&dropdown, |_, _, event, ctx| match event {
+                DropdownEvent::ToggleExpanded | DropdownEvent::Close => ctx.notify(),
             });
         }
     }
@@ -423,12 +517,16 @@ impl CustomEndpointModal {
             editor.clear_buffer_and_reset_undo_stack(ctx);
         });
         for row in &self.model_rows {
-            row.name_editor.update(ctx, |editor, ctx| {
-                editor.clear_buffer_and_reset_undo_stack(ctx);
-            });
-            row.alias_editor.update(ctx, |editor, ctx| {
-                editor.clear_buffer_and_reset_undo_stack(ctx);
-            });
+            for editor in [
+                &row.name_editor,
+                &row.alias_editor,
+                &row.context_window_editor,
+                &row.max_output_editor,
+            ] {
+                editor.update(ctx, |editor, ctx| {
+                    editor.clear_buffer_and_reset_undo_stack(ctx);
+                });
+            }
         }
     }
 
@@ -445,6 +543,8 @@ impl CustomEndpointModal {
         for row in &self.model_rows {
             editors.push(row.name_editor.clone());
             editors.push(row.alias_editor.clone());
+            editors.push(row.context_window_editor.clone());
+            editors.push(row.max_output_editor.clone());
         }
         for editor in editors {
             let colors = text_colors.clone();
@@ -463,7 +563,7 @@ impl CustomEndpointModal {
         let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
         let api_key = self.api_key_editor.as_ref(ctx).buffer_text(ctx);
         let schema = self.selected_schema(ctx);
-        let models: Vec<(String, Option<String>, Option<String>)> = self
+        let models: Vec<CustomModelParams> = self
             .model_rows
             .iter()
             .map(|row| {
@@ -474,9 +574,26 @@ impl CustomEndpointModal {
                 } else {
                     Some(alias)
                 };
-                (name, alias_opt, row.config_key.clone())
+                let parse_tokens = |editor: &ViewHandle<EditorView>| {
+                    let text = editor.as_ref(ctx).buffer_text(ctx);
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        trimmed.parse::<u32>().ok()
+                    }
+                };
+                CustomModelParams {
+                    name,
+                    alias: alias_opt,
+                    config_key: row.config_key.clone(),
+                    context_window: parse_tokens(&row.context_window_editor),
+                    max_output_tokens: parse_tokens(&row.max_output_editor),
+                    reasoning_effort: row.reasoning_effort.map(str::to_owned),
+                    supports_images: row.supports_images,
+                }
             })
-            .filter(|(name, _, _)| !name.trim().is_empty())
+            .filter(|model| !model.name.trim().is_empty())
             .collect();
         if let Some(index) = self.editing_index {
             ctx.emit(CustomEndpointModalEvent::SaveEndpoint {
@@ -519,16 +636,19 @@ impl CustomEndpointModal {
     fn add_model(&mut self, ctx: &mut ViewContext<Self>) {
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
-        let row = Self::create_model_row(None, None, None, font_family, &text_colors, ctx);
-        // Subscribe to the new editors
-        let name_editor = row.name_editor.clone();
-        ctx.subscribe_to_view(&name_editor, |me, editor, event, ctx| {
-            me.handle_model_editor_event(&editor, event, ctx);
-        });
-        let alias_editor = row.alias_editor.clone();
-        ctx.subscribe_to_view(&alias_editor, |me, editor, event, ctx| {
-            me.handle_model_editor_event(&editor, event, ctx);
-        });
+        let row_index = self.model_rows.len();
+        let row = Self::create_model_row_at(None, None, row_index, font_family, &text_colors, ctx);
+        for editor in [
+            &row.name_editor,
+            &row.alias_editor,
+            &row.context_window_editor,
+            &row.max_output_editor,
+        ] {
+            let editor = editor.clone();
+            ctx.subscribe_to_view(&editor, |me, editor, event, ctx| {
+                me.handle_model_editor_event(&editor, event, ctx);
+            });
+        }
         self.model_rows.push(row);
         // ClippedScrollable clamps this to its true maximum after laying out the new row.
         // Until the form overflows, that maximum remains zero and the modal grows naturally.
@@ -568,7 +688,12 @@ impl CustomEndpointModal {
         } else {
             self.model_rows
                 .iter()
-                .position(|row| row.name_editor == *editor || row.alias_editor == *editor)
+                .position(|row| {
+                    row.name_editor == *editor
+                        || row.alias_editor == *editor
+                        || row.context_window_editor == *editor
+                        || row.max_output_editor == *editor
+                })
                 .map(model_row_scroll_position_id)
         };
         if let Some(position_id) = position_id {
@@ -589,6 +714,8 @@ impl CustomEndpointModal {
         for row in &self.model_rows {
             editors.push(&row.name_editor);
             editors.push(&row.alias_editor);
+            editors.push(&row.context_window_editor);
+            editors.push(&row.max_output_editor);
         }
         if let Some(pos) = editors.iter().position(|e| *e == current) {
             let next = (pos + 1) % editors.len();
@@ -605,6 +732,8 @@ impl CustomEndpointModal {
         for row in &self.model_rows {
             editors.push(&row.name_editor);
             editors.push(&row.alias_editor);
+            editors.push(&row.context_window_editor);
+            editors.push(&row.max_output_editor);
         }
         if let Some(pos) = editors.iter().position(|e| *e == current) {
             let prev = if pos == 0 { editors.len() - 1 } else { pos - 1 };
@@ -933,11 +1062,101 @@ impl View for CustomEndpointModal {
                 .with_child(alias_input)
                 .finish();
 
+            let settings_input_style = |width: f32| UiComponentStyles {
+                width: Some(width),
+                ..Default::default()
+            };
+            let context_window_input = appearance
+                .ui_builder()
+                .text_input(row.context_window_editor.clone())
+                .with_style(settings_input_style(MODEL_SETTING_INPUT_WIDTH))
+                .build()
+                .finish();
+            let max_output_input = appearance
+                .ui_builder()
+                .text_input(row.max_output_editor.clone())
+                .with_style(settings_input_style(MODEL_SETTING_INPUT_WIDTH))
+                .build()
+                .finish();
+            let _ = settings_input_style;
+            let effort_dropdown = ConstrainedBox::new(
+                Container::new(ChildView::new(&row.reasoning_effort_dropdown).finish()).finish(),
+            )
+            .with_width(MODEL_SETTING_INPUT_WIDTH)
+            .finish();
+            let row_index = i;
+            let images_switch_state = row.images_switch_state.clone();
+            let images_switch = appearance
+                .ui_builder()
+                .switch(images_switch_state)
+                .check(row.supports_images)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(CustomEndpointModalAction::ToggleModelImages(
+                        row_index,
+                    ));
+                })
+                .finish();
+
+            let model_settings = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(MODEL_ROW_SPACING)
+                .with_child(
+                    Flex::column()
+                        .with_child(
+                            Container::new(label("Context window"))
+                                .with_margin_bottom(4.)
+                                .finish(),
+                        )
+                        .with_child(context_window_input)
+                        .finish(),
+                )
+                .with_child(
+                    Flex::column()
+                        .with_child(
+                            Container::new(label("Max output"))
+                                .with_margin_bottom(4.)
+                                .finish(),
+                        )
+                        .with_child(max_output_input)
+                        .finish(),
+                )
+                .with_child(
+                    Flex::column()
+                        .with_child(
+                            Container::new(label("Thinking"))
+                                .with_margin_bottom(4.)
+                                .finish(),
+                        )
+                        .with_child(effort_dropdown)
+                        .finish(),
+                )
+                .with_child(
+                    Flex::column()
+                        .with_child(
+                            Container::new(label("Images"))
+                                .with_margin_bottom(4.)
+                                .finish(),
+                        )
+                        .with_child(Container::new(images_switch).with_margin_top(6.).finish())
+                        .finish(),
+                )
+                .finish();
+
+            let model_column = Flex::column()
+                .with_child(model_inputs)
+                .with_child(
+                    Container::new(model_settings)
+                        .with_margin_top(MODEL_ROW_SPACING)
+                        .finish(),
+                )
+                .finish();
+
             let mut row = Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_spacing(REMOVE_MODEL_BUTTON_SPACING)
-                .with_child(model_inputs);
+                .with_child(model_column);
             if has_remove_model_button {
                 row.add_child(
                     ConstrainedBox::new(remove_button)
@@ -1108,7 +1327,40 @@ impl TypedActionView for CustomEndpointModal {
                 self.schema = *schema;
                 ctx.notify();
             }
+            CustomEndpointModalAction::SetReasoningEffort(index, effort) => {
+                if let Some(row) = self.model_rows.get_mut(*index) {
+                    row.reasoning_effort = *effort;
+                    row.reasoning_effort_dropdown.update(ctx, |dropdown, ctx| {
+                        dropdown.set_selected_by_name(effort_label(*effort), ctx);
+                    });
+                    ctx.notify();
+                }
+            }
+            CustomEndpointModalAction::ToggleModelImages(index) => {
+                if let Some(row) = self.model_rows.get_mut(*index) {
+                    row.supports_images = !row.supports_images;
+                    ctx.notify();
+                }
+            }
         }
+    }
+}
+
+fn effort_from_str(effort: &str) -> Option<&'static str> {
+    match effort {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        _ => None,
+    }
+}
+
+fn effort_label(effort: Option<&str>) -> &'static str {
+    match effort {
+        Some("low") => "Low",
+        Some("medium") => "Medium",
+        Some("high") => "High",
+        _ => "Default",
     }
 }
 

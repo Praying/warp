@@ -119,6 +119,7 @@ fn install_current_format_custom_endpoint(app: &mut App, secret: Option<&str>) {
             name: "model".to_string(),
             alias: None,
             config_key: "config-key".to_string(),
+            ..Default::default()
         }],
     }];
     let (definitions, mut keys) = CustomEndpointDefinitions::from_legacy(&legacy)
