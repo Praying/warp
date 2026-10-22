@@ -113,3 +113,71 @@ fn run_shell_result_text_reports_output_and_exit_code() {
     };
     assert_eq!(tool_result_text(&message_result), "(exit code 0)\ntotal 0");
 }
+
+#[test]
+fn anthropic_urls_pair_the_v1_suffix_both_ways() {
+    assert_eq!(
+        anthropic::messages_url("https://api.anthropic.com"),
+        "https://api.anthropic.com/v1/messages"
+    );
+    assert_eq!(
+        anthropic::messages_url("https://api.anthropic.com/v1"),
+        "https://api.anthropic.com/v1/messages"
+    );
+    assert_eq!(
+        anthropic::alternate_messages_url("https://api.anthropic.com"),
+        "https://api.anthropic.com/messages"
+    );
+    assert_eq!(
+        anthropic::alternate_messages_url("https://api.anthropic.com/v1/"),
+        "https://api.anthropic.com/v1/v1/messages"
+    );
+}
+
+#[test]
+fn anthropic_messages_merge_consecutive_same_role_turns() {
+    let messages = vec![
+        ChatMessage::user("list files"),
+        ChatMessage::assistant("Running a command."),
+        ChatMessage::assistant_tool_calls(vec![ToolCallRequest {
+            id: "call-1".to_owned(),
+            name: "run_shell_command".to_owned(),
+            arguments: serde_json::json!({"command": "ls"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        }]),
+        ChatMessage::tool_result("call-1", "README.md"),
+    ];
+    let turns = anthropic::anthropic_messages(&messages);
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[0]["role"], "user");
+    assert_eq!(turns[1]["role"], "assistant");
+    // Text and tool_use blocks share the assistant turn.
+    let blocks = turns[1]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[1]["type"], "tool_use");
+    assert_eq!(turns[2]["role"], "user");
+    assert_eq!(turns[2]["content"][0]["type"], "tool_result");
+}
+
+#[test]
+fn gateway_not_found_bodies_are_recognized_and_cleaned() {
+    let error = EndpointError {
+        status: Some(http::StatusCode::BAD_REQUEST),
+        message: clean_error_body(
+            "data:{\"error\":{\"code\":\"400\",\"message\":\"Invalid request\",\"param\":\"404 NOT_FOUND\",\"type\":\"\"}}",
+        ),
+        url: "https://gw.example.com/v1/messages".to_owned(),
+        model: "claude-3".to_owned(),
+    };
+    assert!(error.is_not_found());
+    assert!(!error.message().starts_with("data:"));
+    assert!(
+        error
+            .message()
+            .contains("https://gw.example.com/v1/messages")
+    );
+    assert!(error.message().contains("claude-3"));
+}
