@@ -437,6 +437,8 @@ fn tool_specs() -> serde_json::Value {
 struct EndpointError {
     status: Option<http::StatusCode>,
     message: String,
+    url: String,
+    model: String,
 }
 
 impl EndpointError {
@@ -444,11 +446,39 @@ impl EndpointError {
         self.status == Some(http::StatusCode::BAD_REQUEST)
     }
 
+    /// Gateways frequently report an upstream miss (wrong path or unknown
+    /// model) as a 400 whose body embeds a 404, so treat those as not-found.
+    fn is_not_found(&self) -> bool {
+        self.status == Some(http::StatusCode::NOT_FOUND)
+            || (self.is_bad_request() && {
+                let message = self.message.to_uppercase();
+                message.contains("404") || message.contains("NOT_FOUND")
+            })
+    }
+
     fn message(&self) -> String {
         match self.status {
-            Some(status) => format!("endpoint returned {status}: {}", self.message),
-            None => self.message.clone(),
+            Some(status) => format!(
+                "model {} request to {} failed with {status}: {}",
+                self.model, self.url, self.message
+            ),
+            None => format!(
+                "model {} request to {} failed: {}",
+                self.model, self.url, self.message
+            ),
         }
+    }
+}
+
+/// Strips SSE framing from error bodies: gateways that fail mid-stream
+/// return `data: {...}` payloads, which read as noise in the message.
+fn clean_error_body(body: &str) -> String {
+    let trimmed = body.trim();
+    let trimmed = trimmed.strip_prefix("data:").unwrap_or(trimmed).trim();
+    if trimmed.chars().count() > 500 {
+        format!("{}…", trimmed.chars().take(500).collect::<String>())
+    } else {
+        trimmed.to_owned()
     }
 }
 
@@ -456,57 +486,73 @@ impl EndpointError {
 /// payload of each event.
 fn sse_data_stream(
     url: String,
+    model: LlmModel,
     headers: Vec<(String, String)>,
     body: serde_json::Value,
 ) -> impl Stream<Item = Result<serde_json::Value, EndpointError>> {
+    log::info!("Local agent request: {url} model={}", model.model_id);
     let client = http_client();
     let mut builder = client
-        .post(url)
+        .post(url.clone())
         .json(&body)
         .prevent_sleep("Local agent request in-progress");
     for (name, value) in headers {
         builder = builder.header(name, value);
     }
-    builder.eventsource().filter_map(|event| async {
-        match event {
-            Ok(reqwest_eventsource::Event::Open) => None,
-            Ok(reqwest_eventsource::Event::Message(message)) => {
-                if message.data.trim() == "[DONE]" {
-                    None
-                } else {
-                    Some(
-                        serde_json::from_str(&message.data).map_err(|error| EndpointError {
-                            status: None,
-                            message: format!("failed to parse stream event: {error}"),
-                        }),
-                    )
+    let url_for_errors = url;
+    let model_id = model.model_id;
+    builder.eventsource().filter_map(move |event| {
+        let url = url_for_errors.clone();
+        let model_id = model_id.clone();
+        async move {
+            match event {
+                Ok(reqwest_eventsource::Event::Open) => None,
+                Ok(reqwest_eventsource::Event::Message(message)) => {
+                    if message.data.trim() == "[DONE]" {
+                        None
+                    } else {
+                        Some(
+                            serde_json::from_str(&message.data).map_err(|error| EndpointError {
+                                status: None,
+                                message: format!("failed to parse stream event: {error}"),
+                                url,
+                                model: model_id,
+                            }),
+                        )
+                    }
                 }
+                Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {
+                    let message = match response.bytes().await {
+                        Ok(bytes) => clean_error_body(&String::from_utf8_lossy(&bytes)),
+                        Err(error) => format!("failed to read error body: {error}"),
+                    };
+                    Some(Err(EndpointError {
+                        status: Some(status),
+                        message,
+                        url,
+                        model: model_id,
+                    }))
+                }
+                Err(error) => Some(Err(EndpointError {
+                    status: None,
+                    message: error.to_string(),
+                    url,
+                    model: model_id,
+                })),
             }
-            Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {
-                let message = match response.bytes().await {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                    Err(error) => format!("failed to read error body: {error}"),
-                };
-                Some(Err(EndpointError {
-                    status: Some(status),
-                    message,
-                }))
-            }
-            Err(error) => Some(Err(EndpointError {
-                status: None,
-                message: error.to_string(),
-            })),
         }
     })
 }
 
-/// Guards against an endpoint that rejects the tool catalog (common for
-/// minimal OpenAI-compatible servers): retries once without tools on a 400.
 type RetryFactory =
     Box<dyn FnOnce() -> BoxStream<'static, Result<StreamChunk, String>> + Send + 'static>;
 
-fn with_toolless_retry(
+/// Retries a failed stream once with a replacement when `should_retry`
+/// accepts the failure: used both to drop the tool catalog for endpoints
+/// that reject it and to fall back to the alternate Anthropic path.
+fn retry_once(
     first: BoxStream<'static, Result<StreamChunk, EndpointError>>,
+    should_retry: fn(&EndpointError) -> bool,
     retry: RetryFactory,
 ) -> BoxStream<'static, Result<StreamChunk, String>> {
     enum State {
@@ -521,12 +567,11 @@ fn with_toolless_retry(
             State::First(mut stream, retry) => match stream.next().await {
                 Some(Ok(chunk)) => Some((Ok(chunk), State::First(stream, retry))),
                 Some(Err(error)) => {
-                    if error.is_bad_request()
+                    if should_retry(&error)
                         && let Some(retry) = retry
                     {
                         log::warn!(
-                            "Local agent request rejected with the tool catalog; \
-                             retrying without tools: {}",
+                            "Local agent request failed, retrying once: {}",
                             error.message()
                         );
                         let mut second = retry();
@@ -570,33 +615,32 @@ mod openai {
     pub(super) fn stream(
         request: StreamingRequest,
     ) -> BoxStream<'static, Result<StreamChunk, String>> {
-        let url = format!(
-            "{}/chat/completions",
-            request.model.base_url.trim_end_matches('/')
-        );
+        let model = request.model.clone();
+        let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
         let mut headers = Vec::new();
-        if !request.model.api_key.is_empty() {
+        if !model.api_key.is_empty() {
             headers.push((
                 "Authorization".to_owned(),
-                format!("Bearer {}", request.model.api_key),
+                format!("Bearer {}", model.api_key),
             ));
         }
         let mut body = serde_json::json!({
-            "model": request.model.model_id,
+            "model": model.model_id,
             "stream": true,
             "messages": openai_messages(&request),
         });
-        if let Some(reasoning_effort) = &request.model.reasoning_effort {
+        if let Some(reasoning_effort) = &model.reasoning_effort {
             body["reasoning_effort"] = serde_json::Value::String(reasoning_effort.clone());
         }
 
         let mut body_with_tools = body.clone();
         body_with_tools["tools"] = tool_specs();
-        let first = chunk_stream(url.clone(), headers.clone(), body_with_tools);
-        with_toolless_retry(
+        let first = chunk_stream(url.clone(), model.clone(), headers.clone(), body_with_tools);
+        retry_once(
             first,
+            EndpointError::is_bad_request,
             Box::new(move || {
-                chunk_stream(url, headers, body)
+                chunk_stream(url, model, headers, body)
                     .map(|result| result.map_err(|error| error.message()))
                     .boxed()
             }),
@@ -605,10 +649,11 @@ mod openai {
 
     fn chunk_stream(
         url: String,
+        model: LlmModel,
         headers: Vec<(String, String)>,
         body: serde_json::Value,
     ) -> BoxStream<'static, Result<StreamChunk, EndpointError>> {
-        flatten_chunk_results(sse_data_stream(url, headers, body).scan(
+        flatten_chunk_results(sse_data_stream(url, model, headers, body).scan(
             Accumulator::default(),
             |accumulator, result| {
                 futures::future::ready(Some(match result {
@@ -761,20 +806,43 @@ mod anthropic {
     pub(super) fn stream(
         request: StreamingRequest,
     ) -> BoxStream<'static, Result<StreamChunk, String>> {
-        let url = format!("{}/messages", request.model.base_url.trim_end_matches('/'));
+        let model = request.model.clone();
         let headers = vec![
-            ("x-api-key".to_owned(), request.model.api_key.clone()),
+            ("x-api-key".to_owned(), model.api_key.clone()),
             ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
         ];
         let body = serde_json::json!({
-            "model": request.model.model_id,
+            "model": model.model_id,
             "system": request.system_prompt,
             "stream": true,
             "max_tokens": request.max_output_tokens,
             "messages": anthropic_messages(&request.messages),
             "tools": anthropic_tools(),
         });
-        flatten_chunk_results(sse_data_stream(url, headers, body).scan(
+
+        // Base URLs both with and without a `/v1` suffix are in the wild;
+        // try the conventional pairing first, then the alternate path.
+        let primary_url = messages_url(&model.base_url);
+        let fallback_url = alternate_messages_url(&model.base_url);
+        let first = chunk_stream(primary_url, model.clone(), headers.clone(), body.clone());
+        retry_once(
+            first,
+            EndpointError::is_not_found,
+            Box::new(move || {
+                chunk_stream(fallback_url, model, headers, body)
+                    .map(|result| result.map_err(|error| error.message()))
+                    .boxed()
+            }),
+        )
+    }
+
+    fn chunk_stream(
+        url: String,
+        model: LlmModel,
+        headers: Vec<(String, String)>,
+        body: serde_json::Value,
+    ) -> BoxStream<'static, Result<StreamChunk, EndpointError>> {
+        flatten_chunk_results(sse_data_stream(url, model, headers, body).scan(
             Accumulator::default(),
             |accumulator, result| {
                 futures::future::ready(Some(match result {
@@ -783,8 +851,27 @@ mod anthropic {
                 }))
             },
         ))
-        .map(|result| result.map_err(|error| error.message()))
-        .boxed()
+    }
+
+    /// `https://api.anthropic.com/v1` → `.../v1/messages`;
+    /// `https://api.anthropic.com` → `.../v1/messages`.
+    pub(super) fn messages_url(base_url: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        if base.ends_with("/v1") {
+            format!("{base}/messages")
+        } else {
+            format!("{base}/v1/messages")
+        }
+    }
+
+    /// The path form `messages_url` did not pick.
+    pub(super) fn alternate_messages_url(base_url: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        if base.ends_with("/v1") {
+            format!("{base}/v1/messages")
+        } else {
+            format!("{base}/messages")
+        }
     }
 
     fn anthropic_tools() -> serde_json::Value {
@@ -803,36 +890,54 @@ mod anthropic {
             .into()
     }
 
-    fn anthropic_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
-        messages
-            .iter()
-            .map(|message| match message {
-                ChatMessage::User(content) => serde_json::json!({
-                    "role": "user",
-                    "content": content,
-                }),
-                ChatMessage::Assistant(content) => serde_json::json!({
-                    "role": "assistant",
-                    "content": content,
-                }),
-                ChatMessage::AssistantToolCalls(tool_calls) => serde_json::json!({
-                    "role": "assistant",
-                    "content": tool_calls.iter().map(|tool_call| serde_json::json!({
-                        "type": "tool_use",
-                        "id": tool_call.id,
-                        "name": tool_call.name,
-                        "input": tool_call.arguments,
-                    })).collect::<Vec<_>>(),
-                }),
-                ChatMessage::ToolResult { id, content } => serde_json::json!({
-                    "role": "user",
-                    "content": [{
+    /// Anthropic requires alternating user/assistant turns, so consecutive
+    /// same-role messages (assistant text followed by its tool calls, or
+    /// several tool results) are merged into one turn of content blocks.
+    pub(super) fn anthropic_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+        let mut turns: Vec<(&'static str, Vec<serde_json::Value>)> = Vec::new();
+        for message in messages {
+            let (role, blocks) = match message {
+                ChatMessage::User(content) => (
+                    "user",
+                    vec![serde_json::json!({"type": "text", "text": content})],
+                ),
+                ChatMessage::Assistant(content) => (
+                    "assistant",
+                    vec![serde_json::json!({"type": "text", "text": content})],
+                ),
+                ChatMessage::AssistantToolCalls(tool_calls) => (
+                    "assistant",
+                    tool_calls
+                        .iter()
+                        .map(|tool_call| {
+                            serde_json::json!({
+                                "type": "tool_use",
+                                "id": tool_call.id,
+                                "name": tool_call.name,
+                                "input": tool_call.arguments,
+                            })
+                        })
+                        .collect(),
+                ),
+                ChatMessage::ToolResult { id, content } => (
+                    "user",
+                    vec![serde_json::json!({
                         "type": "tool_result",
                         "tool_use_id": id,
                         "content": content,
-                    }],
-                }),
-            })
+                    })],
+                ),
+            };
+            match turns.last_mut() {
+                Some((last_role, last_blocks)) if *last_role == role => {
+                    last_blocks.extend(blocks);
+                }
+                _ => turns.push((role, blocks)),
+            }
+        }
+        turns
+            .into_iter()
+            .map(|(role, blocks)| serde_json::json!({"role": role, "content": blocks}))
             .collect()
     }
 
