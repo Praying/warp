@@ -53,10 +53,11 @@ fn removal_succeeds_when_credential_cleanup_fails() {
                     name: "Test".to_owned(),
                     base_url: "https://example.com/v1".to_owned(),
                     schema: CustomEndpointSchema::default(),
-                    models: vec![CustomEndpointModel {
+                    models: vec![::ai::api_keys::CustomEndpointModel {
                         name: "model".to_owned(),
                         alias: None,
                         config_key: "config-key".to_owned(),
+                        ..Default::default()
                     }],
                 },
             )

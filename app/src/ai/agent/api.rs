@@ -171,6 +171,11 @@ pub struct RequestParams {
     /// `custom_model_providers`: the selected model's `config_key` indexes into this
     /// registry. `None` when no custom router is selected.
     pub custom_model_routers: Option<warp_multi_agent_api::request::settings::CustomModelRouters>,
+    /// The configured custom-endpoint model matching the base selection, when
+    /// one is selected. Carries per-model settings (context window, output
+    /// size, reasoning effort, image support) that the local agent engine
+    /// consumes.
+    pub custom_model: Option<ai::api_keys::CustomEndpointModel>,
     pub allow_use_of_warp_credits: bool,
     /// Asks the server not to attach the user's delegated ChatGPT token, so OpenAI requests run
     /// on Warp's key. Set for the rest of a conversation after a token-sharing failure.
@@ -237,6 +242,7 @@ impl RequestParams {
             api_keys: None,
             custom_model_providers: None,
             custom_model_routers: None,
+            custom_model: None,
             allow_use_of_warp_credits: false,
             skip_chatgpt_subscription: false,
             autonomy_level: Default::default(),
@@ -364,6 +370,9 @@ impl RequestParams {
                 &request_input.coding_model_id,
             )
         });
+        let custom_model = api_key_manager
+            .custom_endpoint_model(request_input.model_id.as_str())
+            .cloned();
         let allow_use_of_warp_credits = *AISettings::as_ref(app).can_use_warp_credits_for_fallback;
 
         let app_execution_mode = AppExecutionMode::as_ref(app);
@@ -449,6 +458,7 @@ impl RequestParams {
             api_keys,
             custom_model_providers,
             custom_model_routers,
+            custom_model,
             allow_use_of_warp_credits,
             skip_chatgpt_subscription: conversation.use_warp_credits_instead_of_chatgpt,
             autonomy_level,

@@ -31,25 +31,51 @@ pub(super) struct LlmModel {
     pub schema: api::request::settings::custom_model_providers::CustomEndpointSchema,
     pub model_id: String,
     pub reasoning_effort: Option<String>,
+    pub context_window: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+    pub supports_images: bool,
 }
 
 pub(super) struct StreamingRequest {
     pub model: LlmModel,
     pub system_prompt: String,
     pub messages: Vec<ChatMessage>,
-    pub max_output_tokens: u32,
+}
+
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
+
+/// An image attachment, base64-encoded.
+pub(super) struct InputImage {
+    pub data_base64: String,
+    pub mime_type: String,
 }
 
 pub(super) enum ChatMessage {
-    User(String),
+    User {
+        text: String,
+        images: Vec<InputImage>,
+    },
     Assistant(String),
     AssistantToolCalls(Vec<ToolCallRequest>),
-    ToolResult { id: String, content: String },
+    ToolResult {
+        id: String,
+        content: String,
+    },
 }
 
 impl ChatMessage {
     pub(super) fn user(content: impl Into<String>) -> Self {
-        Self::User(content.into())
+        Self::User {
+            text: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    pub(super) fn user_with_images(content: impl Into<String>, images: Vec<InputImage>) -> Self {
+        Self::User {
+            text: content.into(),
+            images,
+        }
     }
 
     pub(super) fn assistant(content: impl Into<String>) -> Self {
@@ -753,17 +779,36 @@ mod openai {
         }
     }
 
-    fn openai_messages(request: &StreamingRequest) -> Vec<serde_json::Value> {
+    pub(super) fn openai_messages(request: &StreamingRequest) -> Vec<serde_json::Value> {
         let mut messages = vec![serde_json::json!({
             "role": "system",
             "content": request.system_prompt,
         })];
         for message in &request.messages {
             match message {
-                ChatMessage::User(content) => messages.push(serde_json::json!({
-                    "role": "user",
-                    "content": content,
-                })),
+                ChatMessage::User { text, images } => {
+                    let content = if images.is_empty() {
+                        serde_json::Value::String(text.clone())
+                    } else {
+                        let mut parts = vec![serde_json::json!({
+                            "type": "text",
+                            "text": text,
+                        })];
+                        parts.extend(images.iter().map(|image| {
+                            serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!("data:{};base64,{}", image.mime_type, image.data_base64),
+                                },
+                            })
+                        }));
+                        serde_json::Value::Array(parts)
+                    };
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": content,
+                    }));
+                }
                 ChatMessage::Assistant(content) => messages.push(serde_json::json!({
                     "role": "assistant",
                     "content": content,
@@ -811,14 +856,20 @@ mod anthropic {
             ("x-api-key".to_owned(), model.api_key.clone()),
             ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
         ];
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model.model_id,
             "system": request.system_prompt,
             "stream": true,
-            "max_tokens": request.max_output_tokens,
+            "max_tokens": model.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
             "messages": anthropic_messages(&request.messages),
             "tools": anthropic_tools(),
         });
+        if let Some(budget_tokens) = thinking_budget(&model) {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget_tokens,
+            });
+        }
 
         // Base URLs both with and without a `/v1` suffix are in the wild;
         // try the conventional pairing first, then the alternate path.
@@ -874,6 +925,19 @@ mod anthropic {
         }
     }
 
+    /// Maps the configured reasoning effort to an Anthropic thinking budget,
+    /// clamped so the budget stays below `max_tokens`.
+    pub(super) fn thinking_budget(model: &LlmModel) -> Option<u32> {
+        let budget = match model.reasoning_effort.as_deref()? {
+            "low" => 1024,
+            "medium" => 4096,
+            "high" => 16384,
+            _ => return None,
+        };
+        let max_tokens = model.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        Some(budget.clamp(1024, max_tokens.saturating_sub(1024).max(1024)))
+    }
+
     fn anthropic_tools() -> serde_json::Value {
         let specs = tool_specs().as_array().cloned().unwrap_or_default();
         specs
@@ -897,10 +961,20 @@ mod anthropic {
         let mut turns: Vec<(&'static str, Vec<serde_json::Value>)> = Vec::new();
         for message in messages {
             let (role, blocks) = match message {
-                ChatMessage::User(content) => (
-                    "user",
-                    vec![serde_json::json!({"type": "text", "text": content})],
-                ),
+                ChatMessage::User { text, images } => {
+                    let mut blocks = vec![serde_json::json!({"type": "text", "text": text})];
+                    blocks.extend(images.iter().map(|image| {
+                        serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": image.mime_type,
+                                "data": image.data_base64,
+                            },
+                        })
+                    }));
+                    ("user", blocks)
+                }
                 ChatMessage::Assistant(content) => (
                     "assistant",
                     vec![serde_json::json!({"type": "text", "text": content})],
