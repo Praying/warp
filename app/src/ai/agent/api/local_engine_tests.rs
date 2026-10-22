@@ -320,3 +320,92 @@ fn streams_completion_from_an_openai_compatible_endpoint() {
 fn custom_provider_request_with_url(_base_url: &str) -> api::Request {
     custom_provider_request("custom-mock")
 }
+
+#[test]
+fn streams_completion_from_an_anthropic_endpoint() {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = vec![0u8; 8192];
+        let read = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..read]).to_string();
+        // The base URL has no /v1 suffix, so the heuristic must add it.
+        assert!(
+            request.contains("POST /v1/messages"),
+            "unexpected path in request: {request}"
+        );
+
+        let body = concat!(
+            "data: {\"type\":\"message_start\"}\n\n",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Bonjour\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\"}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let request = anthropic_request(&format!("http://127.0.0.1:{port}"));
+    let events: Vec<_> = futures::executor::block_on(async {
+        generate_local_multi_agent_output(&request)
+            .then(|event| async move { event })
+            .collect()
+            .await
+    });
+    server.join().unwrap();
+
+    let text: String = events
+        .iter()
+        .filter_map(|event| event.as_ref().ok())
+        .filter_map(|event| {
+            let Some(api::response_event::Type::ClientActions(actions)) = &event.r#type else {
+                return None;
+            };
+            Some(actions.actions.iter().filter_map(|action| {
+                let Some(api::client_action::Action::AddMessagesToTask(add)) = &action.action
+                else {
+                    return None;
+                };
+                add.messages
+                    .iter()
+                    .find_map(|message| match &message.message {
+                        Some(api::message::Message::AgentOutput(output)) => {
+                            Some(output.text.clone())
+                        }
+                        _ => None,
+                    })
+            }))
+        })
+        .flatten()
+        .collect();
+    assert_eq!(text, "Bonjour");
+}
+
+fn anthropic_request(base_url: &str) -> api::Request {
+    let mut request = custom_provider_request("custom-mock");
+    request.settings.as_mut().unwrap().custom_model_providers =
+        Some(api::request::settings::CustomModelProviders {
+            providers: vec![api::request::settings::custom_model_providers::CustomModelProvider {
+                base_url: base_url.to_owned(),
+                api_key: "test-key".to_owned(),
+                models: vec![api::request::settings::custom_model_providers::CustomModel {
+                    slug: "claude-mock".to_owned(),
+                    config_key: "custom-mock".to_owned(),
+                    reasoning_effort: String::new(),
+                }],
+                schema:
+                    api::request::settings::custom_model_providers::CustomEndpointSchema::AnthropicMessages
+                        as i32,
+            }],
+        });
+    request
+}
