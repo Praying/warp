@@ -406,6 +406,9 @@ impl CustomEndpointModal {
             );
             dropdown
         });
+        reasoning_effort_dropdown.update(ctx, |dropdown, ctx| {
+            dropdown.set_selected_by_name(effort_label(reasoning_effort), ctx);
+        });
 
         ModelRow {
             name_editor,
@@ -1276,9 +1279,8 @@ impl View for CustomEndpointModal {
         .for_single_frame()
         .finish();
 
-        // Render the schema dropdown popup at the outermost Stack level so it
-        // paints after all form content and appears on top of sibling fields.
-        let schema_popup = self.schema_dropdown.as_ref(app).render_menu_as_overlay();
+        // Render dropdown popups at the outermost Stack level so they paint
+        // after all form content and appear on top of sibling fields.
         let mut outer_stack = Stack::new();
         outer_stack.add_child(
             Flex::column()
@@ -1287,8 +1289,14 @@ impl View for CustomEndpointModal {
                 .with_child(buttons_row)
                 .finish(),
         );
-        if let Some((popup, positioning)) = schema_popup {
-            outer_stack.add_positioned_overlay_child(popup, positioning);
+        for dropdown in std::iter::once(&self.schema_dropdown).chain(
+            self.model_rows
+                .iter()
+                .map(|row| &row.reasoning_effort_dropdown),
+        ) {
+            if let Some((popup, positioning)) = dropdown.as_ref(app).render_menu_as_overlay() {
+                outer_stack.add_positioned_overlay_child(popup, positioning);
+            }
         }
         outer_stack.finish()
     }
