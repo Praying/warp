@@ -283,6 +283,7 @@ fn endpoint_with_keys(
                 name: (*n).into(),
                 alias: a.map(|s| s.into()),
                 config_key: (*cfg).into(),
+                ..Default::default()
             })
             .collect(),
     }
@@ -700,6 +701,7 @@ fn display_label_uses_alias_when_present() {
         name: "raw-name".into(),
         alias: Some("My Alias".into()),
         config_key: "k".into(),
+        ..Default::default()
     };
     assert_eq!(m.display_label(), "My Alias");
 }
@@ -710,6 +712,7 @@ fn display_label_falls_back_to_name_when_alias_missing() {
         name: "raw-name".into(),
         alias: None,
         config_key: "k".into(),
+        ..Default::default()
     };
     assert_eq!(m.display_label(), "raw-name");
 }
@@ -720,6 +723,7 @@ fn display_label_falls_back_to_name_when_alias_is_whitespace() {
         name: "raw-name".into(),
         alias: Some("   ".into()),
         config_key: "k".into(),
+        ..Default::default()
     };
     assert_eq!(m.display_label(), "raw-name");
 }
@@ -1450,4 +1454,67 @@ fn grok_expired_refresh_token_ignores_in_flight_refresh() {
         mgr.grok_expired_refresh_token(true),
         Some("refresh".to_string())
     );
+}
+
+#[test]
+fn custom_endpoint_model_resolves_by_config_key() {
+    let manager = make_manager(ApiKeys {
+        custom_endpoints: vec![CustomEndpoint {
+            name: "endpoint".to_owned(),
+            url: "https://custom.io/v1".to_owned(),
+            api_key: "key".to_owned(),
+            schema: CustomEndpointSchema::AnthropicMessages,
+            models: vec![
+                CustomEndpointModel {
+                    name: "model-a".to_owned(),
+                    alias: None,
+                    config_key: "key-a".to_owned(),
+                    context_window: Some(128_000),
+                    max_output_tokens: Some(8192),
+                    reasoning_effort: Some("high".to_owned()),
+                    supports_images: true,
+                },
+                CustomEndpointModel {
+                    name: "model-b".to_owned(),
+                    ..Default::default()
+                },
+            ],
+        }],
+        ..Default::default()
+    });
+    let resolved = manager.custom_endpoint_model("key-a").unwrap();
+    assert_eq!(resolved.name, "model-a");
+    assert_eq!(resolved.context_window, Some(128_000));
+    assert_eq!(resolved.max_output_tokens, Some(8192));
+    assert_eq!(resolved.reasoning_effort.as_deref(), Some("high"));
+    assert!(resolved.supports_images);
+    assert!(manager.custom_endpoint_model("missing").is_none());
+}
+
+#[test]
+fn custom_endpoint_model_settings_round_trip_through_toml() {
+    let definitions = CustomEndpointDefinitions::default();
+    let _ = definitions;
+    let model = CustomEndpointModel {
+        name: "model".to_owned(),
+        alias: None,
+        config_key: "key".to_owned(),
+        context_window: Some(200_000),
+        max_output_tokens: None,
+        reasoning_effort: Some("medium".to_owned()),
+        supports_images: true,
+    };
+    let json = serde_json::to_string(&model).unwrap();
+    // Unset fields stay out of the serialized form.
+    assert!(!json.contains("max_output_tokens"));
+    let round_tripped: CustomEndpointModel = serde_json::from_str(&json).unwrap();
+    assert_eq!(round_tripped, model);
+    // Old configurations without the new fields still deserialize.
+    let legacy = serde_json::json!({
+        "name": "old",
+        "config_key": "old-key",
+    });
+    let legacy: CustomEndpointModel = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.context_window, None);
+    assert!(!legacy.supports_images);
 }

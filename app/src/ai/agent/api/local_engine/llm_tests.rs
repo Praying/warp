@@ -181,3 +181,88 @@ fn gateway_not_found_bodies_are_recognized_and_cleaned() {
     );
     assert!(error.message().contains("claude-3"));
 }
+
+#[test]
+fn thinking_budget_maps_effort_and_respects_max_tokens() {
+    let model = |reasoning_effort: Option<&str>, max_output_tokens: Option<u32>| LlmModel {
+        reasoning_effort: reasoning_effort.map(str::to_owned),
+        max_output_tokens,
+        ..llm_model()
+    };
+    assert_eq!(
+        anthropic::thinking_budget(&model(Some("low"), None)),
+        Some(1024)
+    );
+    assert_eq!(
+        anthropic::thinking_budget(&model(Some("medium"), None)),
+        Some(4096)
+    );
+    // Without a configured max output, the default 8192 caps the budget.
+    assert_eq!(
+        anthropic::thinking_budget(&model(Some("high"), None)),
+        Some(7168)
+    );
+    assert_eq!(
+        anthropic::thinking_budget(&model(Some("bogus"), None)),
+        None
+    );
+    assert_eq!(anthropic::thinking_budget(&model(None, None)), None);
+    // The budget must stay below max_tokens.
+    assert_eq!(
+        anthropic::thinking_budget(&model(Some("high"), Some(4096))),
+        Some(3072)
+    );
+}
+
+#[test]
+fn openai_user_message_carries_images_as_content_blocks() {
+    let request = StreamingRequest {
+        model: llm_model(),
+        system_prompt: "system".to_owned(),
+        messages: vec![ChatMessage::user_with_images(
+            "what is this?",
+            vec![InputImage {
+                data_base64: "aGVsbG8=".to_owned(),
+                mime_type: "image/png".to_owned(),
+            }],
+        )],
+    };
+    let messages = openai::openai_messages(&request);
+    let content = &messages[1]["content"];
+    assert_eq!(content.as_array().unwrap().len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(
+        content[1]["image_url"]["url"],
+        "data:image/png;base64,aGVsbG8="
+    );
+}
+
+#[test]
+fn anthropic_user_message_carries_image_blocks() {
+    let messages = vec![ChatMessage::user_with_images(
+        "describe",
+        vec![InputImage {
+            data_base64: "aGVsbG8=".to_owned(),
+            mime_type: "image/jpeg".to_owned(),
+        }],
+    )];
+    let turns = anthropic::anthropic_messages(&messages);
+    let blocks = turns[0]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/jpeg");
+}
+
+fn llm_model() -> LlmModel {
+    LlmModel {
+        base_url: "http://localhost".to_owned(),
+        api_key: String::new(),
+        schema: api::request::settings::custom_model_providers::CustomEndpointSchema::OpenaiChatCompletions,
+        model_id: "test".to_owned(),
+        reasoning_effort: None,
+        context_window: None,
+        max_output_tokens: None,
+        supports_images: false,
+    }
+}

@@ -1,9 +1,8 @@
 use ai::api_keys::{
     ApiKeyManager, CustomEndpointDefinition, CustomEndpointDefinitions, CustomEndpointId,
-    CustomEndpointModel, CustomEndpointParams,
+    CustomEndpointParams, CustomModelParams,
 };
 use settings::Setting;
-use uuid::Uuid;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
 use crate::LaunchMode;
@@ -191,13 +190,7 @@ fn definition_from_params(params: CustomEndpointParams) -> CustomEndpointDefinit
         models: params
             .models
             .into_iter()
-            .map(|(name, alias, config_key)| CustomEndpointModel {
-                name,
-                alias,
-                config_key: config_key
-                    .filter(|key| !key.trim().is_empty())
-                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            })
+            .map(CustomModelParams::into_model)
             .collect(),
     }
 }
