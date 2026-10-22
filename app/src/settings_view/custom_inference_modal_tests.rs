@@ -438,3 +438,42 @@ fn endpoint_form_valid_accepts_complete_valid_form() {
         true
     ));
 }
+
+#[test]
+fn reasoning_effort_dropdown_offers_and_tracks_selection() {
+    App::test((), |mut app| async move {
+        init_modal_test_models(&mut app);
+        let (_window_id, modal) = app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+            CustomEndpointModal::new(None, None, ctx)
+        });
+
+        modal.update(&mut app, |modal, ctx| {
+            let dropdown = modal.model_rows[0].reasoning_effort_dropdown.clone();
+
+            // The dropdown starts on the default effort.
+            assert_eq!(
+                dropdown.as_ref(ctx).selected_action(),
+                Some(CustomEndpointModalAction::SetReasoningEffort(0, None)),
+            );
+
+            // Selecting the fourth item ("High") mirrors the wired action and
+            // updates the row the action handler writes to.
+            dropdown.update(ctx, |dropdown, ctx| {
+                dropdown.set_selected_by_index(3, ctx);
+            });
+            // The action handler applies the wired selection to the row.
+            modal.handle_action(
+                &CustomEndpointModalAction::SetReasoningEffort(0, Some("high")),
+                ctx,
+            );
+            assert_eq!(modal.model_rows[0].reasoning_effort, Some("high"));
+            assert_eq!(
+                dropdown.as_ref(ctx).selected_action(),
+                Some(CustomEndpointModalAction::SetReasoningEffort(
+                    0,
+                    Some("high")
+                )),
+            );
+        });
+    })
+}
