@@ -39,7 +39,6 @@ mod llm;
 const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_API_BASE_URL: &str = "https://api.anthropic.com/v1";
 const AGENT_OUTPUT_TEXT_PATH: &str = "agent_output.text";
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const NO_ACCOUNT_MODEL_HINT: &str = "this model runs on Warp's servers, which requires a \
      Warp account. Configure a custom model endpoint or your own API key to use the agent \
      without an account";
@@ -48,8 +47,11 @@ const NO_ACCOUNT_MODEL_HINT: &str = "this model runs on Warp's servers, which re
 /// would. Always returns a stream: setup and request failures surface as
 /// `StreamFinished` internal errors so the conversation shows one clean,
 /// terminal message instead of triggering transport retries.
-pub(super) fn generate_local_multi_agent_output(request: &api::Request) -> ResponseStream {
-    let state = match prepare(request) {
+pub(super) fn generate_local_multi_agent_output(
+    request: &api::Request,
+    custom_model: Option<&ai::api_keys::CustomEndpointModel>,
+) -> ResponseStream {
+    let state = match prepare(request, custom_model) {
         Ok(engine) => LocalEngineState::Running(engine),
         Err(error) => LocalEngineState::Failed(format!("{error:#}")),
     };
@@ -105,6 +107,9 @@ fn resolve_model(request: &api::Request) -> Result<LlmModel, String> {
                 model_id: model.slug.clone(),
                 reasoning_effort: (!model.reasoning_effort.is_empty())
                     .then(|| model.reasoning_effort.clone()),
+                context_window: None,
+                max_output_tokens: None,
+                supports_images: false,
             })
         })
     };
@@ -156,6 +161,9 @@ fn resolve_byo_key(
                 api::request::settings::custom_model_providers::CustomEndpointSchema::AnthropicMessages,
             model_id: model_id.to_owned(),
             reasoning_effort: None,
+            context_window: None,
+            max_output_tokens: None,
+            supports_images: false,
         });
     }
     if !api_keys.openai.is_empty() {
@@ -166,6 +174,9 @@ fn resolve_byo_key(
                 api::request::settings::custom_model_providers::CustomEndpointSchema::OpenaiChatCompletions,
             model_id: model_id.to_owned(),
             reasoning_effort: None,
+            context_window: None,
+            max_output_tokens: None,
+            supports_images: false,
         });
     }
     Err(NO_ACCOUNT_MODEL_HINT.to_owned())
@@ -187,8 +198,21 @@ struct LocalEngine {
     finished: bool,
 }
 
-fn prepare(request: &api::Request) -> anyhow::Result<LocalEngine> {
-    let model = resolve_model(request).map_err(anyhow::Error::msg)?;
+fn prepare(
+    request: &api::Request,
+    custom_model: Option<&ai::api_keys::CustomEndpointModel>,
+) -> anyhow::Result<LocalEngine> {
+    let mut model = resolve_model(request).map_err(anyhow::Error::msg)?;
+    if let Some(custom_model) = custom_model {
+        // The app-side model carries per-model settings the request wire does
+        // not; merge them over the resolved endpoint model.
+        model.context_window = custom_model.context_window;
+        model.max_output_tokens = custom_model.max_output_tokens;
+        model.supports_images = custom_model.supports_images;
+        if let Some(reasoning_effort) = custom_model.reasoning_effort.as_deref() {
+            model.reasoning_effort = Some(reasoning_effort.to_owned());
+        }
+    }
 
     let input = request
         .input
@@ -223,21 +247,19 @@ fn prepare(request: &api::Request) -> anyhow::Result<LocalEngine> {
         .map(|metadata| metadata.conversation_id.clone())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let messages = build_chat_history(tasks, input);
+    let mut messages = build_chat_history(tasks, input);
+    if let Some(context_window) = model.context_window {
+        truncate_history(&mut messages, context_window);
+    }
+    if model.supports_images {
+        attach_input_images(&mut messages, input);
+    }
     let system_prompt = build_system_prompt(input);
-    let max_output_tokens = request
-        .settings
-        .as_ref()
-        .and_then(|settings| settings.model_config.as_ref())
-        .map(|config| config.base_model_context_window_limit)
-        .filter(|limit| *limit > 0)
-        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
 
     let stream = llm::stream_completion(StreamingRequest {
         model,
         system_prompt,
         messages,
-        max_output_tokens,
     });
 
     Ok(LocalEngine {
@@ -509,6 +531,75 @@ fn build_system_prompt(input: &api::request::Input) -> String {
         }
     }
     prompt
+}
+
+/// Drops the oldest messages so the history fits the model's context window.
+/// A rough 4-chars-per-token estimate bounds the work; the suffix must not
+/// begin with an orphan tool result, which would break tool_use/tool_result
+/// pairing on the wire.
+fn truncate_history(messages: &mut Vec<ChatMessage>, context_window: u32) {
+    let estimate = |messages: &[ChatMessage]| -> u32 {
+        messages
+            .iter()
+            .map(|message| match message {
+                ChatMessage::User { text, images } => {
+                    (text.len() / 4) as u32
+                        + images
+                            .iter()
+                            .map(|image| (image.data_base64.len() / 4 / 3) as u32)
+                            .sum::<u32>()
+                }
+                ChatMessage::Assistant(text) => (text.len() / 4) as u32,
+                ChatMessage::AssistantToolCalls(tool_calls) => tool_calls
+                    .iter()
+                    .map(|tool_call| 16 + tool_call.arguments.len() as u32 / 4)
+                    .sum(),
+                ChatMessage::ToolResult { content, .. } => (content.len() / 4) as u32,
+            })
+            .map(|tokens| tokens + 8)
+            .sum()
+    };
+    if estimate(messages) <= context_window {
+        return;
+    }
+    for start in 1..messages.len() {
+        if matches!(messages[start], ChatMessage::ToolResult { .. }) {
+            continue;
+        }
+        if estimate(&messages[start..]) <= context_window {
+            messages.drain(..start);
+            return;
+        }
+    }
+    // Nothing fits: keep only the latest turn.
+    let last = messages.len().saturating_sub(1);
+    messages.drain(..last);
+}
+
+/// Attaches this request's pasted images to the conversation's last user
+/// message so image-capable models receive them.
+fn attach_input_images(messages: &mut Vec<ChatMessage>, input: &api::request::Input) {
+    let Some(context) = input.context.as_ref() else {
+        return;
+    };
+    if context.images.is_empty() {
+        return;
+    }
+    let images: Vec<llm::InputImage> = context
+        .images
+        .iter()
+        .map(|image| llm::InputImage {
+            data_base64: String::from_utf8_lossy(&image.data).to_string(),
+            mime_type: image.mime_type.clone(),
+        })
+        .collect();
+    match messages.last_mut() {
+        Some(ChatMessage::User {
+            images: user_images,
+            ..
+        }) => user_images.extend(images),
+        _ => messages.push(ChatMessage::user_with_images(String::new(), images)),
+    }
 }
 
 fn internal_error_event(message: String) -> ResponseEvent {

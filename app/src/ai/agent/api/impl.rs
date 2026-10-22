@@ -154,7 +154,8 @@ pub async fn generate_multi_agent_output(
     // the user's own model instead.
     if server_api.as_ref().using_local_credentials() {
         let output_stream =
-            local_engine::generate_local_multi_agent_output(&request).take_until(cancellation_rx);
+            local_engine::generate_local_multi_agent_output(&request, params.custom_model.as_ref())
+                .take_until(cancellation_rx);
         return Ok(Box::pin(output_stream));
     }
 
