@@ -499,6 +499,47 @@ impl Cache {
         }
     }
 
+    /// Selects a preferred family only when the primary lacks the character and the fallback has it.
+    pub fn font_family_for_char_with_fallback(
+        &self,
+        char: char,
+        family: FamilyId,
+        fallback_family: Option<FamilyId>,
+        properties: Properties,
+    ) -> FamilyId {
+        let Some(fallback) = fallback_family else {
+            return family;
+        };
+        let font = self.select_font(family, properties);
+        if self
+            .preferred_fallback_font_for_char(char, font, Some(fallback))
+            .is_some()
+        {
+            fallback
+        } else {
+            family
+        }
+    }
+
+    pub fn preferred_fallback_font_for_char(
+        &self,
+        char: char,
+        font: FontId,
+        fallback_family: Option<FamilyId>,
+    ) -> Option<FontId> {
+        let fallback_family = fallback_family?;
+        if self.platform.glyph_for_char(font, char).is_some() {
+            return None;
+        }
+        let properties = *self.font_properties.get(&font)?;
+        let fallback_font = self.select_font(fallback_family, properties);
+        if self.platform.glyph_for_char(fallback_font, char).is_some() {
+            Some(fallback_font)
+        } else {
+            None
+        }
+    }
+
     pub fn family_id_for_name(&self, name: &str) -> Option<FamilyId> {
         self.platform.family_id_for_name(name)
     }

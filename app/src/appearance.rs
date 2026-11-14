@@ -29,6 +29,7 @@ use crate::themes::theme::{ThemeKind, WarpTheme};
 /// accordingly 2) hold transient theme states that are used when user is switching
 /// between temporary theme overrides in the theme picker.
 pub struct AppearanceManager {
+    terminal_fallback_font_family: Option<FamilyId>,
     // The transient theme is a theme that is set by the user but not saved
     // as a setting. It is used when the user is actively choosing a theme.
     transient_theme: Option<WarpTheme>,
@@ -59,7 +60,20 @@ impl AppearanceManager {
 
         ctx.subscribe_to_model(
             &FontSettings::handle(ctx),
-            move |_, _, event, ctx| match event {
+            move |me, _, event, ctx| match event {
+                FontSettingsChangedEvent::TerminalFallbackFontName { .. } => {
+                    let font_name = FontSettings::as_ref(ctx)
+                        .terminal_fallback_font_name
+                        .value()
+                        .clone();
+                    if font_name.is_empty() {
+                        me.terminal_fallback_font_family = None;
+                        ctx.invalidate_all_views();
+                    } else if let Some(family) = get_or_load_font_family(&font_name, ctx) {
+                        me.terminal_fallback_font_family = Some(family);
+                        ctx.invalidate_all_views();
+                    }
+                }
                 FontSettingsChangedEvent::MonospaceFontName { .. } => {
                     let (font_name, match_fonts) = {
                         let settings = FontSettings::as_ref(ctx);
@@ -125,10 +139,15 @@ impl AppearanceManager {
         );
 
         Self {
+            terminal_fallback_font_family: load_terminal_fallback_font(ctx),
             transient_theme: None,
             #[cfg(target_os = "macos")]
             app_icon_at_startup: *AppIconSettings::handle(ctx).as_ref(ctx).app_icon.value(),
         }
+    }
+
+    pub fn terminal_fallback_font_family(&self) -> Option<FamilyId> {
+        self.terminal_fallback_font_family
     }
 
     pub fn refresh_theme_state(&mut self, ctx: &mut ModelContext<Self>) {
@@ -393,6 +412,18 @@ fn get_or_load_font_family(font_name: &str, ctx: &mut AppContext) -> Option<Fami
     })
 }
 
+fn load_terminal_fallback_font(ctx: &mut AppContext) -> Option<FamilyId> {
+    let font_name = FontSettings::as_ref(ctx)
+        .terminal_fallback_font_name
+        .value()
+        .clone();
+    if font_name.is_empty() {
+        None
+    } else {
+        get_or_load_font_family(&font_name, ctx)
+    }
+}
+
 fn build_appearance(ctx: &mut AppContext) -> Appearance {
     let default_monospace_font_family = load_default_monospace_font_family(ctx)
         .expect("unable to load default monospace font family");
@@ -448,3 +479,7 @@ pub fn register(app: &mut impl AddSingletonModel) {
     app.add_singleton_model(|ctx| build_appearance(ctx));
     app.add_singleton_model(AppearanceManager::new);
 }
+
+#[cfg(test)]
+#[path = "appearance_tests.rs"]
+mod tests;
