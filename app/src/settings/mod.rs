@@ -19,6 +19,7 @@ mod init;
 pub mod initializer;
 mod input;
 mod input_mode;
+mod language;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux;
 mod local_control;
@@ -62,6 +63,7 @@ pub use iap::*;
 pub use init::*;
 pub use input::*;
 pub use input_mode::*;
+pub use language::*;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux::*;
 pub use local_control::*;

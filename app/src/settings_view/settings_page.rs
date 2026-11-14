@@ -51,6 +51,7 @@ use super::warp_agent_page::WarpAgentPageView;
 use super::warp_drive_page::WarpDriveSettingsPageView;
 use super::warpify_page::WarpifyPageView;
 use crate::appearance::Appearance;
+use crate::i18n::tr;
 use crate::settings::CloudPreferencesSettings;
 use crate::themes::theme::Fill;
 use crate::ui_components::blended_colors;
@@ -295,6 +296,7 @@ pub fn build_sub_header(
     color_override: Option<Fill>,
 ) -> Container {
     let color = color_override.unwrap_or(appearance.theme().active_ui_text_color());
+    let text_name = tr(&text_name.into()).into_owned();
     Container::new(
         Align::new(
             Text::new_inline(text_name, appearance.ui_font_family(), SUBHEADER_FONT_SIZE)
@@ -318,9 +320,13 @@ pub fn render_sub_header_with_description(
             .with_child(build_sub_header(appearance, text_name, None).finish())
             .with_child(
                 Align::new(
-                    Text::new(description, appearance.ui_font_family(), CONTENT_FONT_SIZE)
-                        .with_color(appearance.theme().nonactive_ui_text_color().into())
-                        .finish(),
+                    Text::new(
+                        tr(&description.into()).into_owned(),
+                        appearance.ui_font_family(),
+                        CONTENT_FONT_SIZE,
+                    )
+                    .with_color(appearance.theme().nonactive_ui_text_color().into())
+                    .finish(),
                 )
                 .left()
                 .finish(),
@@ -337,6 +343,7 @@ pub fn render_sub_sub_header(
     text_name: impl Into<Cow<'static, str>>,
     local_only_icon_state: Option<LocalOnlyIconState>,
 ) -> Box<dyn Element> {
+    let text_name = tr(&text_name.into()).into_owned();
     let mut sub_sub_header = Flex::row().with_child(
         Container::new(
             Align::new(
@@ -371,6 +378,7 @@ pub fn render_custom_size_header(
     font_size: f32,
     color_override: Option<Fill>,
 ) -> Box<dyn Element> {
+    let text_name = tr(&text_name.into()).into_owned();
     Flex::row()
         .with_child(
             Container::new(
@@ -761,8 +769,12 @@ pub fn render_body_item_label_internal<T: Clone + Action>(
             ToggleState::Disabled => appearance.theme().disabled_ui_text_color(),
         },
     };
-    let label_text = Text::new_inline(label_text, appearance.ui_font_family(), CONTENT_FONT_SIZE)
-        .with_color(label_color.into());
+    let label_text = Text::new_inline(
+        tr(&label_text).into_owned(),
+        appearance.ui_font_family(),
+        CONTENT_FONT_SIZE,
+    )
+    .with_color(label_color.into());
     if let Some(icon) = label_icon {
         label.add_child(
             Container::new(
@@ -847,7 +859,7 @@ pub fn render_body_item_label_internal<T: Clone + Action>(
 
 fn render_title_text(text: &str, size: f32, appearance: &Appearance) -> Box<dyn Element> {
     Align::new(
-        Text::new_inline(text.to_string(), appearance.ui_font_family(), size)
+        Text::new_inline(tr(text).into_owned(), appearance.ui_font_family(), size)
             .with_style(Properties::default().weight(Weight::Bold))
             .with_color(appearance.theme().active_ui_text_color().into())
             .finish(),
@@ -953,13 +965,17 @@ pub fn render_dropdown_item_label(
     color_override: Option<Fill>,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
-    let label = Text::new(label_text, appearance.ui_font_family(), CONTENT_FONT_SIZE)
-        .with_color(
-            color_override
-                .unwrap_or(appearance.theme().active_ui_text_color())
-                .into(),
-        )
-        .finish();
+    let label = Text::new(
+        tr(&label_text).into_owned(),
+        appearance.ui_font_family(),
+        CONTENT_FONT_SIZE,
+    )
+    .with_color(
+        color_override
+            .unwrap_or(appearance.theme().active_ui_text_color())
+            .into(),
+    )
+    .finish();
     let label = if let Some(secondary_text) = secondary_text {
         let warp_theme = appearance.theme();
         let secondary_text_child = appearance

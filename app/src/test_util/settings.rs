@@ -51,8 +51,8 @@ pub fn initialize_settings_for_tests_with_mode_and_headlessness(
         AISettings, AccessibilitySettings, AliasExpansionSettings, AppEditorSettings,
         BlockVisibilitySettings, ChangelogSettings, CloudPreferencesSettings, CodeSettings,
         DebugSettings, EmacsBindingsSettings, FontSettings, GPUSettings, InputModeSettings,
-        InputSettings, LocalControlSettings, NativePreferenceSettings, PaneSettings,
-        SameLinePromptBlockSettings, ScrollSettings, SelectionSettings,
+        InputSettings, LanguageSettings, LocalControlSettings, NativePreferenceSettings,
+        PaneSettings, SameLinePromptBlockSettings, ScrollSettings, SelectionSettings,
         SharedObjectLimitBannerSettings, SshSettings, ThemeSettings, TuiVoiceSettings,
         VimBannerSettings, init_and_register_user_preferences,
     };
@@ -106,6 +106,7 @@ pub fn initialize_settings_for_tests_with_mode_and_headlessness(
     InputModeSettings::register(app);
     InputSettings::register(app);
     KeysSettings::register(app);
+    LanguageSettings::register(app);
     LigatureSettings::register(app);
     if warp_core::features::FeatureFlag::WarpControlCli.is_enabled() {
         LocalControlSettings::register(app);

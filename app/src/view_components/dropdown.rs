@@ -19,6 +19,7 @@ use warpui::{
 };
 
 use crate::appearance::Appearance;
+use crate::i18n::tr;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
 
 pub const TOP_MENU_BAR_HEIGHT: f32 = 30.;
@@ -639,7 +640,7 @@ where
                 let text = if let Some(formatter) = &self.menu_header_text_override {
                     formatter(label)
                 } else {
-                    label.to_string()
+                    tr(label).into_owned()
                 };
                 (text, fields.override_font_family())
             }
