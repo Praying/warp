@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+temp_dir="$(mktemp -d)"
+trap 'rm -rf "$temp_dir"' EXIT
+
+export TEST_STATE_DIR="$temp_dir"
+export PATH="$temp_dir/bin:$PATH"
+mkdir -p "$temp_dir/bin"
+
+cat > "$temp_dir/bin/xcrun" <<'EOF'
+#!/bin/sh
+test "$*" = '-sdk macosx metal --version' || exit 99
+echo probe >> "$TEST_STATE_DIR/probes"
+test -f "$TEST_STATE_DIR/metal"
+EOF
+
+cat > "$temp_dir/bin/xcodebuild" <<'EOF'
+#!/bin/sh
+test "$*" = '-downloadComponent MetalToolchain' || exit 99
+echo download >> "$TEST_STATE_DIR/downloads"
+case "$TEST_SCENARIO" in
+  preinstalled)
+    echo "xcodebuild: error: invalid option '-downloadComponent'" >&2
+    exit 64
+    ;;
+  download)
+    touch "$TEST_STATE_DIR/metal"
+    ;;
+  download-fails)
+    exit 42
+    ;;
+  download-unusable)
+    exit 0
+    ;;
+  *) exit 99 ;;
+esac
+EOF
+chmod +x "$temp_dir/bin/xcrun" "$temp_dir/bin/xcodebuild"
+
+for scenario in preinstalled download download-fails download-unusable; do
+  export TEST_SCENARIO="$scenario"
+  rm -f "$temp_dir/metal" "$temp_dir/downloads" "$temp_dir/probes"
+  if [[ "$scenario" == preinstalled ]]; then
+    touch "$temp_dir/metal"
+  fi
+
+  status=0
+  sh "$script_dir/install_build_deps" || status=$?
+  case "$scenario" in
+    preinstalled)
+      test "$status" -eq 0
+      test ! -f "$temp_dir/downloads"
+      test -s "$temp_dir/probes"
+      ;;
+    download)
+      test "$status" -eq 0
+      test "$(wc -l < "$temp_dir/downloads")" -eq 1
+      test "$(wc -l < "$temp_dir/probes")" -eq 2
+      ;;
+    download-fails)
+      test "$status" -eq 42
+      test "$(wc -l < "$temp_dir/downloads")" -eq 1
+      ;;
+    download-unusable)
+      test "$status" -ne 0
+      test "$(wc -l < "$temp_dir/downloads")" -eq 1
+      test "$(wc -l < "$temp_dir/probes")" -eq 2
+      ;;
+  esac
+  echo "PASS: $scenario"
+done
