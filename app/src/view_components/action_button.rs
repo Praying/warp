@@ -24,6 +24,7 @@ use warpui::{
     SingletonEntity as _, TypedActionView, View, ViewContext,
 };
 
+use crate::i18n::tr;
 use crate::settings_view::keybindings::{KeybindingChangedEvent, KeybindingChangedNotifier};
 use crate::terminal::input::{MenuPositioning, MenuPositioningProvider};
 use crate::ui_components::icons::Icon;
@@ -567,6 +568,7 @@ impl ActionButton {
         let Some(tooltip) = self.tooltip.clone() else {
             return;
         };
+        let tooltip = tr(&tooltip).into_owned();
 
         let tooltip_sublabel = self
             .tooltip_keybinding
@@ -795,7 +797,7 @@ impl View for ActionButton {
                     .font_properties()
                     .unwrap_or_else(|| self.size.font_properties());
                 let mut text = Text::new_inline(
-                    self.label.clone(),
+                    tr(&self.label).into_owned(),
                     appearance.ui_font_family(),
                     self.size.font_size(appearance),
                 )

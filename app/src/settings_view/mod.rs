@@ -344,23 +344,24 @@ use crate::util::bindings::custom_tag_to_keystroke;
 
 impl Display for SettingsSection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SettingsSection::BillingAndUsage => write!(f, "Billing and usage"),
-            SettingsSection::Keybindings => write!(f, "Keyboard shortcuts"),
-            SettingsSection::SharedBlocks => write!(f, "Shared blocks"),
-            SettingsSection::Scripting => write!(f, "Scripting"),
-            SettingsSection::WarpDrive => write!(f, "Warp Drive"),
-            SettingsSection::WarpAgent => write!(f, "Warp Agent"),
-            SettingsSection::AgentProfiles => write!(f, "Profiles"),
-            SettingsSection::AgentMCPServers => write!(f, "MCP servers"),
-            SettingsSection::Knowledge => write!(f, "Knowledge"),
-            SettingsSection::ThirdPartyCLIAgents => write!(f, "Third party CLI agents"),
-            SettingsSection::CodeIndexing => write!(f, "Indexing and projects"),
-            SettingsSection::EditorAndCodeReview => write!(f, "Editor and Code Review"),
-            SettingsSection::CloudEnvironments => write!(f, "Environments"),
-            SettingsSection::WarpCloudAgentAPIKeys => write!(f, "API keys"),
-            _ => write!(f, "{self:?}"),
-        }
+        let label = match self {
+            SettingsSection::BillingAndUsage => "Billing and usage",
+            SettingsSection::Keybindings => "Keyboard shortcuts",
+            SettingsSection::SharedBlocks => "Shared blocks",
+            SettingsSection::Scripting => "Scripting",
+            SettingsSection::WarpDrive => "Warp Drive",
+            SettingsSection::WarpAgent => "Warp Agent",
+            SettingsSection::AgentProfiles => "Profiles",
+            SettingsSection::AgentMCPServers => "MCP servers",
+            SettingsSection::Knowledge => "Knowledge",
+            SettingsSection::ThirdPartyCLIAgents => "Third party CLI agents",
+            SettingsSection::CodeIndexing => "Indexing and projects",
+            SettingsSection::EditorAndCodeReview => "Editor and Code Review",
+            SettingsSection::CloudEnvironments => "Environments",
+            SettingsSection::WarpCloudAgentAPIKeys => "API keys",
+            _ => return write!(f, "{self:?}"),
+        };
+        write!(f, "{}", crate::i18n::tr(label))
     }
 }
 
@@ -1357,7 +1358,7 @@ impl SettingsView {
                 ..Default::default()
             };
             let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text("Search", ctx);
+            editor.set_placeholder_text(crate::i18n::tr("Search").into_owned(), ctx);
             editor
         });
 
@@ -2899,7 +2900,7 @@ impl BackingView for SettingsView {
         _ctx: &view::HeaderRenderContext<'_>,
         _app: &AppContext,
     ) -> view::HeaderContent {
-        view::HeaderContent::simple("Settings")
+        view::HeaderContent::simple(crate::i18n::tr("Settings").into_owned())
     }
 
     fn set_focus_handle(&mut self, focus_handle: PaneFocusHandle, _ctx: &mut ViewContext<Self>) {

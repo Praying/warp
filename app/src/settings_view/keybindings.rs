@@ -28,6 +28,7 @@ use crate::editor::{
     EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions,
     TextOptions,
 };
+use crate::i18n::tr;
 use crate::keyboard::{UserDefinedKeybinding, write_custom_keybinding};
 use crate::search_bar::SearchBar;
 use crate::settings::CloudPreferencesSettings;
@@ -900,9 +901,13 @@ fn render_button(
     line_color: themes::theme::Fill,
 ) -> Box<dyn Element> {
     Container::new(
-        Text::new_inline(text, appearance.ui_font_family(), appearance.ui_font_size())
-            .with_color(line_color.into())
-            .finish(),
+        Text::new_inline(
+            tr(text).into_owned(),
+            appearance.ui_font_family(),
+            appearance.ui_font_size(),
+        )
+        .with_color(line_color.into())
+        .finish(),
     )
     .with_uniform_padding(4.0)
     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
@@ -919,7 +924,7 @@ fn render_text(
 ) -> Box<dyn Element> {
     let mut text = appearance
         .ui_builder()
-        .wrappable_text(text.to_string(), true);
+        .wrappable_text(tr(text).into_owned(), true);
 
     if let Some(styles) = styles {
         text = text.with_style(styles);
