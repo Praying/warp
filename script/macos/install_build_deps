@@ -2,4 +2,10 @@
 #
 # Installs macOS-specific build dependencies required to build Warp.
 
-xcodebuild -downloadComponent MetalToolchain
+set -e
+
+if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+    xcodebuild -downloadComponent MetalToolchain
+fi
+
+xcrun -sdk macosx metal --version
