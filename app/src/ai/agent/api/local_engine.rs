@@ -23,7 +23,9 @@ use warp_multi_agent_api::message::tool_call::{
     ApplyFileDiffs, FileGlobV2, Grep, ReadFiles, RunShellCommand, Tool,
 };
 use warp_multi_agent_api::message::{AgentOutput, Message as MessageKind, ToolCall, UserQuery};
-use warp_multi_agent_api::response_event::stream_finished::InternalError;
+use warp_multi_agent_api::response_event::stream_finished::{
+    ConversationUsageMetadata, InternalError,
+};
 use warp_multi_agent_api::response_event::{
     ClientActions, StreamFinished, StreamInit, stream_finished,
 };
@@ -190,7 +192,11 @@ struct LocalEngine {
     run_id: String,
     task_id: String,
     task_existed: bool,
-    user_queries: Vec<String>,
+    input_messages: Vec<Message>,
+    context_window: Option<u32>,
+    input_tokens: u64,
+    output_tokens: Option<u64>,
+    output_bytes: usize,
     stream: BoxStream<'static, Result<llm::StreamChunk, String>>,
     output_message_open: bool,
     init_emitted: bool,
@@ -218,8 +224,7 @@ fn prepare(
         .input
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("request has no input"))?;
-    let user_queries = collect_user_queries(input);
-    if user_queries.is_empty() && !has_tool_call_results(input) {
+    if !has_user_query_or_tool_call_result(input) {
         return Err(anyhow::anyhow!(
             "the local agent only supports prompts and tool results; this request type \
              requires a Warp account"
@@ -246,6 +251,8 @@ fn prepare(
         .filter(|metadata| !metadata.conversation_id.is_empty())
         .map(|metadata| metadata.conversation_id.clone())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let request_id = Uuid::new_v4().to_string();
+    let input_messages = input_messages(input, &task_id, &request_id);
 
     let mut messages = build_chat_history(tasks, input);
     if let Some(context_window) = model.context_window {
@@ -256,19 +263,26 @@ fn prepare(
     }
     let system_prompt = build_system_prompt(input);
 
-    let stream = llm::stream_completion(StreamingRequest {
+    let context_window = model.context_window.filter(|limit| *limit > 0);
+    let streaming_request = StreamingRequest {
         model,
         system_prompt,
         messages,
-    });
+    };
+    let input_tokens = llm::estimate_input_tokens(&streaming_request);
+    let stream = llm::stream_completion(streaming_request);
 
     Ok(LocalEngine {
         conversation_id,
-        request_id: Uuid::new_v4().to_string(),
+        request_id,
         run_id: Uuid::new_v4().to_string(),
         task_id,
         task_existed,
-        user_queries,
+        input_messages,
+        context_window,
+        input_tokens,
+        output_tokens: None,
+        output_bytes: 0,
         stream,
         output_message_open: false,
         init_emitted: false,
@@ -304,7 +318,7 @@ impl LocalEngine {
             }
             None => {
                 self.finished = true;
-                Some(done_event())
+                Some(self.done_event())
             }
         }
     }
@@ -316,10 +330,10 @@ impl LocalEngine {
         if !self.task_existed {
             actions.push(create_task_action(self.task_id.clone()));
         }
-        for query in &self.user_queries {
+        if !self.input_messages.is_empty() {
             actions.push(add_messages_action(
                 self.task_id.clone(),
-                vec![user_query_message(&self.task_id, &self.request_id, query)],
+                self.input_messages.clone(),
             ));
         }
         client_actions_event(actions)
@@ -327,10 +341,23 @@ impl LocalEngine {
 
     fn chunk_event(&mut self, chunk: llm::StreamChunk) -> ResponseEvent {
         match chunk {
+            llm::StreamChunk::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                if let Some(input_tokens) = input_tokens {
+                    self.input_tokens = input_tokens;
+                }
+                if let Some(output_tokens) = output_tokens {
+                    self.output_tokens = Some(output_tokens);
+                }
+                client_actions_event(Vec::new())
+            }
             llm::StreamChunk::Text(delta) => {
                 if delta.is_empty() {
                     return client_actions_event(Vec::new());
                 }
+                self.output_bytes += delta.len();
                 if self.output_message_open {
                     client_actions_event(vec![append_text_action(
                         &self.task_id,
@@ -347,6 +374,10 @@ impl LocalEngine {
                 }
             }
             llm::StreamChunk::ToolCall(tool) => {
+                self.output_bytes += tool.name.len()
+                    + serde_json::to_string(&tool.arguments)
+                        .unwrap_or_default()
+                        .len();
                 // Tool calls end the assistant's turn, mirroring MAA: the
                 // client executes them and sends the results in the next
                 // request.
@@ -362,6 +393,28 @@ impl LocalEngine {
     fn output_message_id(&self) -> String {
         format!("output-{}", self.request_id)
     }
+
+    fn done_event(&self) -> ResponseEvent {
+        let conversation_usage_metadata = self.context_window.map(|context_window| {
+            let output_tokens = self
+                .output_tokens
+                .unwrap_or(self.output_bytes.div_ceil(4) as u64);
+            ConversationUsageMetadata {
+                context_window_usage: (self.input_tokens.saturating_add(output_tokens) as f64
+                    / f64::from(context_window))
+                .clamp(0.0, 1.0) as f32,
+                total_input_tokens: self.input_tokens.min(u64::from(u32::MAX)) as u32,
+                ..Default::default()
+            }
+        });
+        ResponseEvent {
+            r#type: Some(api::response_event::Type::Finished(StreamFinished {
+                reason: Some(stream_finished::Reason::Done(stream_finished::Done {})),
+                conversation_usage_metadata,
+                ..Default::default()
+            })),
+        }
+    }
 }
 
 fn is_root_task(task: &Task) -> bool {
@@ -370,28 +423,20 @@ fn is_root_task(task: &Task) -> bool {
         .is_none_or(|dependencies| dependencies.parent_task_id.is_empty())
 }
 
-fn collect_user_queries(input: &api::request::Input) -> Vec<String> {
-    let Some(api::request::input::Type::UserInputs(user_inputs)) = input.r#type.as_ref() else {
-        return Vec::new();
-    };
-    user_inputs
-        .inputs
-        .iter()
-        .filter_map(|user_input| match user_input.input.as_ref() {
-            Some(api::request::input::user_inputs::user_input::Input::UserQuery(query)) => {
-                Some(query.query.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn has_tool_call_results(input: &api::request::Input) -> bool {
+fn has_user_query_or_tool_call_result(input: &api::request::Input) -> bool {
     let Some(api::request::input::Type::UserInputs(user_inputs)) = input.r#type.as_ref() else {
         return false;
     };
+
     user_inputs.inputs.iter().any(|user_input| {
         matches!(
+            user_input.input.as_ref(),
+            Some(
+                api::request::input::user_inputs::user_input::Input::UserQuery(
+                    api::request::input::UserQuery { query, .. }
+                )
+            ) if !query.is_empty()
+        ) || matches!(
             user_input.input.as_ref(),
             Some(api::request::input::user_inputs::user_input::Input::ToolCallResult(_))
         )
@@ -468,6 +513,55 @@ fn new_input_messages(input: &api::request::Input) -> Vec<ChatMessage> {
                 Some(ChatMessage::tool_result(
                     result.tool_call_id.clone(),
                     llm::input_tool_result_text(result),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn input_messages(input: &api::request::Input, task_id: &str, request_id: &str) -> Vec<Message> {
+    let Some(api::request::input::Type::UserInputs(user_inputs)) = input.r#type.as_ref() else {
+        return Vec::new();
+    };
+
+    user_inputs
+        .inputs
+        .iter()
+        .filter_map(|user_input| match user_input.input.as_ref()? {
+            api::request::input::user_inputs::user_input::Input::UserQuery(query)
+                if !query.query.is_empty() =>
+            {
+                Some(user_query_message(task_id, request_id, &query.query))
+            }
+            api::request::input::user_inputs::user_input::Input::ToolCallResult(result) => {
+                let tool_call_id = result.tool_call_id.clone();
+                let result = match result.result.as_ref()? {
+                    api::request::input::tool_call_result::Result::RunShellCommand(result) => {
+                        api::message::tool_call_result::Result::RunShellCommand(result.clone())
+                    }
+                    api::request::input::tool_call_result::Result::ReadFiles(result) => {
+                        api::message::tool_call_result::Result::ReadFiles(result.clone())
+                    }
+                    api::request::input::tool_call_result::Result::Grep(result) => {
+                        api::message::tool_call_result::Result::Grep(result.clone())
+                    }
+                    api::request::input::tool_call_result::Result::FileGlobV2(result) => {
+                        api::message::tool_call_result::Result::FileGlobV2(result.clone())
+                    }
+                    api::request::input::tool_call_result::Result::ApplyFileDiffs(result) => {
+                        api::message::tool_call_result::Result::ApplyFileDiffs(result.clone())
+                    }
+                    _ => return None,
+                };
+                Some(new_message(
+                    task_id,
+                    request_id,
+                    MessageKind::ToolCallResult(api::message::ToolCallResult {
+                        tool_call_id,
+                        result: Some(result),
+                        ..Default::default()
+                    }),
                 ))
             }
             _ => None,
@@ -608,15 +702,6 @@ fn internal_error_event(message: String) -> ResponseEvent {
             reason: Some(stream_finished::Reason::InternalError(InternalError {
                 message,
             })),
-            ..Default::default()
-        })),
-    }
-}
-
-fn done_event() -> ResponseEvent {
-    ResponseEvent {
-        r#type: Some(api::response_event::Type::Finished(StreamFinished {
-            reason: Some(stream_finished::Reason::Done(stream_finished::Done {})),
             ..Default::default()
         })),
     }
