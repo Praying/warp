@@ -3,15 +3,106 @@ use super::*;
 fn text_chunk(chunk: &StreamChunk) -> &str {
     match chunk {
         StreamChunk::Text(text) => text,
-        StreamChunk::ToolCall(_) => panic!("expected a text chunk"),
+        StreamChunk::ToolCall(_) | StreamChunk::Usage { .. } => panic!("expected a text chunk"),
     }
 }
 
 fn tool_chunk(chunk: &StreamChunk) -> &ToolCallRequest {
     match chunk {
         StreamChunk::ToolCall(tool) => tool,
-        StreamChunk::Text(_) => panic!("expected a tool call chunk"),
+        StreamChunk::Text(_) | StreamChunk::Usage { .. } => panic!("expected a tool call chunk"),
     }
+}
+
+#[test]
+fn openai_usage_only_chunk_preserves_zero_and_does_not_double_count_cached_tokens() {
+    let mut accumulator = openai::Accumulator::default();
+    let chunks = accumulator.map_payload(&serde_json::json!({
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 0,
+            "prompt_tokens_details": { "cached_tokens": 100 },
+        },
+    }));
+    assert!(matches!(
+        chunks.as_slice(),
+        [StreamChunk::Usage {
+            input_tokens: Some(120),
+            output_tokens: Some(0),
+        }]
+    ));
+    assert!(
+        accumulator
+            .map_payload(&serde_json::json!({"usage": null, "choices": []}))
+            .is_empty()
+    );
+}
+
+#[test]
+fn anthropic_usage_includes_cache_and_preserves_missing_input_on_delta() {
+    let mut accumulator = anthropic::Accumulator::default();
+    let start = accumulator.map_payload(&serde_json::json!({
+        "type": "message_start",
+        "message": { "usage": {
+            "input_tokens": 20,
+            "cache_creation_input_tokens": 40,
+            "cache_read_input_tokens": 60,
+            "output_tokens": 1,
+        }},
+    }));
+    assert!(matches!(
+        start.as_slice(),
+        [StreamChunk::Usage {
+            input_tokens: Some(120),
+            output_tokens: Some(1),
+        }]
+    ));
+    let delta = accumulator.map_payload(&serde_json::json!({
+        "type": "message_delta", "usage": { "output_tokens": 30 },
+    }));
+    assert!(matches!(
+        delta.as_slice(),
+        [StreamChunk::Usage {
+            input_tokens: None,
+            output_tokens: Some(30),
+        }]
+    ));
+}
+
+#[test]
+fn openai_retries_without_usage_options_but_keeps_tools() {
+    let mut server = mockito::Server::new();
+    let rejected = server
+        .mock("POST", "/chat/completions")
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "stream_options": {"include_usage": true},
+        })))
+        .with_status(400)
+        .with_body("unsupported stream_options")
+        .create();
+    let accepted = server
+        .mock("POST", "/chat/completions")
+        .match_request(|request| {
+            let body: serde_json::Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+            body.get("stream_options").is_none() && body.get("tools").is_some()
+        })
+        .with_header("content-type", "text/event-stream")
+        .with_body("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+        .create();
+    let request = StreamingRequest {
+        model: LlmModel {
+            base_url: server.url(),
+            ..llm_model()
+        },
+        system_prompt: "test".to_owned(),
+        messages: vec![ChatMessage::user("hello")],
+    };
+    let chunks = futures::executor::block_on(openai::stream(request).collect::<Vec<_>>());
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(text_chunk(chunks[0].as_ref().unwrap()), "ok");
+    rejected.assert();
+    accepted.assert();
 }
 
 #[test]

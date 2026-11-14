@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use chrono::{DateTime, Utc};
 use settings::Setting as _;
 use warp_core::features::FeatureFlag;
@@ -7,7 +10,9 @@ use warpui::{App, EntityId, SingletonEntity};
 
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::blocklist::{BlocklistAIHistoryModel, BlocklistAIPermissions};
-use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
+use crate::ai::execution_profiles::profiles::{
+    AIExecutionProfilesModel, AIExecutionProfilesModelEvent,
+};
 use crate::ai::execution_profiles::{
     AIExecutionProfile, ActionPermission, CloudAIExecutionProfileModel, ExecutionProfileId,
     WriteToPtyPermission, create_default_for_tui_from_legacy_settings,
@@ -16,6 +21,7 @@ use crate::ai::execution_profiles::{
 use crate::ai::llms::LLMId;
 use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
+use crate::auth::credentials::Credentials;
 use crate::auth::user::{TEST_USER_UID, User};
 use crate::auth::{AuthStateProvider, UserUid};
 use crate::cloud_object::model::actions::ObjectActions;
@@ -133,6 +139,95 @@ fn install_singletons(app: &mut App, auth_state: AuthStateProvider) {
     app.add_singleton_model(PrivacySettings::mock);
     app.add_singleton_model(|_| UserProfiles::new(Vec::new()));
     app.add_singleton_model(UserWorkspaces::default_mock);
+}
+
+fn assert_local_profiles_work_without_cloud(file_backed_flag: bool) {
+    let _guard = FeatureFlag::FileBackedExecutionProfiles.override_enabled(file_backed_flag);
+    App::test((), |mut app| async move {
+        let auth = AuthStateProvider::new_logged_out_for_test();
+        auth.get().set_user(Some(User::local()));
+        auth.get().set_credentials(Some(Credentials::Local));
+        install_singletons(&mut app, auth);
+        let expected_default = app.read(create_default_from_legacy_settings);
+        let profiles = app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        let profile_created = Rc::new(Cell::new(false));
+        let observed_created = profile_created.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&profiles, move |_, event, _| {
+                if matches!(event, AIExecutionProfilesModelEvent::ProfileCreated) {
+                    observed_created.set(true);
+                }
+            });
+        });
+        app.read(|ctx| {
+            assert!(
+                AuthStateProvider::as_ref(ctx)
+                    .get()
+                    .using_local_credentials()
+            );
+            assert!(!UpdateManager::as_ref(ctx).has_completed_initial_load());
+        });
+        let profile_id = profiles
+            .update(&mut app, |model, ctx| model.create_profile(ctx))
+            .expect("local sessions must create profiles without cloud initialization");
+        assert!(profile_created.get());
+        profiles.read(&app, |model, ctx| {
+            assert!(model.get_all_profile_ids().contains(&profile_id));
+            assert_eq!(model.default_profile(ctx).data(), &expected_default);
+            let created = model.get_profile_by_id(&profile_id, ctx).unwrap();
+            assert!(!created.data().is_default_profile);
+            assert!(created.sync_id().is_none());
+        });
+        profiles.update(&mut app, |model, ctx| {
+            model.set_profile_name(&profile_id, "Local coding", ctx);
+            model.set_base_model(&profile_id, Some(LLMId::from("custom-local")), ctx);
+            model.set_profile_name(&ExecutionProfileId::default_profile(), "My default", ctx);
+        });
+        let restored = app
+            .add_model(|ctx| AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx));
+        restored.read(&app, |model, ctx| {
+            let profile = model.get_profile_by_id(&profile_id, ctx).unwrap();
+            assert_eq!(profile.data().name, "Local coding");
+            assert_eq!(profile.data().base_model, Some(LLMId::from("custom-local")));
+            assert_eq!(model.default_profile(ctx).data().name, "My default");
+            assert!(
+                AISettings::as_ref(ctx)
+                    .execution_profiles
+                    .is_value_explicitly_set()
+            );
+        });
+        restored.update(&mut app, |model, ctx| {
+            model.delete_profile(&profile_id, ctx)
+        });
+        app.read(|ctx| {
+            assert!(
+                AISettings::as_ref(ctx)
+                    .execution_profiles
+                    .value()
+                    .profile(&profile_id)
+                    .is_none()
+            );
+            assert!(
+                AISettings::as_ref(ctx)
+                    .execution_profiles
+                    .value()
+                    .profile(&ExecutionProfileId::default_profile())
+                    .is_some()
+            );
+        });
+    });
+}
+
+#[test]
+fn local_profiles_work_without_cloud_with_legacy_gui_flag() {
+    assert_local_profiles_work_without_cloud(false);
+}
+
+#[test]
+fn local_profiles_work_without_cloud_with_file_backed_gui_flag() {
+    assert_local_profiles_work_without_cloud(true);
 }
 
 fn complete_cloud_initial_load(app: &mut App) {
