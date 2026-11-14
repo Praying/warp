@@ -54,6 +54,7 @@ use crate::editor::{
 };
 use crate::features::FeatureFlag;
 use crate::gpu_state::{GPUState, GPUStateEvent};
+use crate::i18n::AppLanguage;
 use crate::prompt::editor_modal::OpenSource as PromptEditorOpenSource;
 use crate::server::telemetry::{InputUXChangeOrigin, TelemetryEvent};
 use crate::settings::app_icon::{AppIcon, AppIconSettings, ShowDockIconState};
@@ -61,8 +62,8 @@ use crate::settings::{
     AIFontName, AISettings, AppEditorSettings, CodeSettings, CursorBlink, CursorBlinkEnabled,
     CursorDisplayType, DEFAULT_MONOSPACE_FONT_NAME, EnforceMinimumContrast, FocusPaneOnHover,
     FontSettings, FontSettingsChangedEvent, GPUSettings, InputBoxType, InputModeSettings,
-    InputModeState, InputSettings, InputSettingsChangedEvent, MonospaceFontName, PaneSettings,
-    ShouldDimInactivePanes, TerminalFallbackFontName, ThemeSettings, UseSystemTheme,
+    InputModeState, InputSettings, InputSettingsChangedEvent, LanguageSettings, MonospaceFontName,
+    PaneSettings, ShouldDimInactivePanes, TerminalFallbackFontName, ThemeSettings, UseSystemTheme,
     UseThinStrokes, active_theme_kind, respect_system_theme,
 };
 use crate::terminal::block_list_viewport::InputMode;
@@ -504,6 +505,7 @@ pub enum AppearancePageAction {
     ToggleToolsPanelWarpDrive,
     ToggleToolsPanelConversationHistory,
     SetEnforceMinimumContrast(EnforceMinimumContrast),
+    SetLanguage(AppLanguage),
     OpenUrl(String),
     ToggleFocusPaneOnHover,
     ToggleInputMode,
@@ -542,6 +544,7 @@ pub struct AppearanceSettingsPageView {
     thin_strokes_dropdown: ViewHandle<Dropdown<AppearancePageAction>>,
     enforce_min_contrast_dropdown: ViewHandle<Dropdown<AppearancePageAction>>,
     input_mode_dropdown: ViewHandle<Dropdown<AppearancePageAction>>,
+    language_dropdown: ViewHandle<Dropdown<AppearancePageAction>>,
     window_backdrop_dropdown: ViewHandle<Dropdown<AppearancePageAction>>,
     input_type_radio_state: RadioButtonStateHandle,
     app_icon_dropdown: ViewHandle<Dropdown<AppearancePageAction>>,
@@ -623,6 +626,11 @@ impl TypedActionView for AppearanceSettingsPageView {
                             .enforce_minimum_contrast
                             .set_value(*value, ctx,)
                     );
+                });
+            }
+            SetLanguage(language) => {
+                LanguageSettings::handle(ctx).update(ctx, |language_settings, ctx| {
+                    report_if_error!(language_settings.app_language.set_value(*language, ctx));
                 });
             }
             SetWorkspaceDecorationVisibility(value) => {
@@ -959,6 +967,15 @@ impl AppearanceSettingsPageView {
                 let input_mode = *InputModeSettings::as_ref(ctx).input_mode;
                 dropdown
                     .set_selected_by_name(Self::input_mode_dropdown_item_label(input_mode), ctx);
+                ctx.notify();
+            });
+            ctx.notify()
+        });
+
+        ctx.subscribe_to_model(&LanguageSettings::handle(ctx), |me, _, _, ctx| {
+            me.language_dropdown.update(ctx, |dropdown, ctx| {
+                let language = *LanguageSettings::as_ref(ctx).app_language.value();
+                dropdown.set_selected_by_index(language as usize, ctx);
                 ctx.notify();
             });
             ctx.notify()
@@ -1306,6 +1323,25 @@ impl AppearanceSettingsPageView {
             dropdown
         });
 
+        let language_dropdown = ctx.add_typed_action_view(|ctx| {
+            let mut dropdown = Dropdown::new(ctx);
+            dropdown.add_items(
+                AppLanguage::all()
+                    .into_iter()
+                    .map(|language| {
+                        DropdownItem::new(
+                            language.as_dropdown_label().to_string(),
+                            AppearancePageAction::SetLanguage(language),
+                        )
+                    })
+                    .collect(),
+                ctx,
+            );
+            let selected_index = *LanguageSettings::as_ref(ctx).app_language.value() as usize;
+            dropdown.set_selected_by_index(selected_index, ctx);
+            dropdown
+        });
+
         let context_chips = Self::get_context_chip_renderers(ctx);
 
         let alt_screen_padding_editor = {
@@ -1356,6 +1392,7 @@ impl AppearanceSettingsPageView {
             font_weight_dropdown,
             thin_strokes_dropdown,
             input_mode_dropdown,
+            language_dropdown,
             window_backdrop_dropdown: Self::build_window_backdrop_dropdown(ctx),
             input_type_radio_state,
             app_icon_dropdown,
@@ -1384,13 +1421,16 @@ impl AppearanceSettingsPageView {
     }
 
     fn build_page(ctx: &mut ViewContext<Self>) -> PageType<Self> {
-        let mut categories = vec![Category::new(
-            "Themes",
-            vec![
-                Box::new(CreateCustomThemeWidget::default()),
-                Box::new(ThemeSelectWidget::default()),
-            ],
-        )];
+        let mut categories = vec![
+            Category::new("Language", vec![Box::new(LanguageWidget)]),
+            Category::new(
+                "Themes",
+                vec![
+                    Box::new(CreateCustomThemeWidget::default()),
+                    Box::new(ThemeSelectWidget::default()),
+                ],
+            ),
+        ];
 
         if AppIconSettings::as_ref(ctx).is_supported_on_current_platform() {
             categories.push(Category::new(
@@ -3879,6 +3919,33 @@ impl SettingsWidget for InputModeWidget {
             ),
             None,
             &view.input_mode_dropdown,
+        )
+    }
+}
+
+struct LanguageWidget;
+
+impl SettingsWidget for LanguageWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "language locale english chinese simplified 简体中文 语言 interface i18n"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        _app: &AppContext,
+    ) -> Box<dyn Element> {
+        render_dropdown_item(
+            appearance,
+            "Language",
+            None,
+            None,
+            LocalOnlyIconState::Hidden,
+            None,
+            &view.language_dropdown,
         )
     }
 }

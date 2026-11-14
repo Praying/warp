@@ -28,6 +28,7 @@ use warpui::{
 };
 
 use crate::appearance::Appearance;
+use crate::i18n::tr;
 use crate::safe_triangle::SafeTriangle;
 use crate::themes::theme::Fill;
 use crate::ui_components::buttons::icon_button_with_color;
@@ -272,7 +273,7 @@ impl MenuItemLabel {
     ) -> Box<dyn Element> {
         match self {
             Self::Text(label) => {
-                let mut text = Text::new_inline(label.clone(), font_family, font_size)
+                let mut text = Text::new_inline(tr(label).into_owned(), font_family, font_size)
                     .with_color(primary_color.into())
                     .autosize_text(MINIMUM_MENU_ITEM_FONT_SIZE);
                 if let Some(config) = clip_config {
@@ -284,7 +285,7 @@ impl MenuItemLabel {
                 let max_height_for_n_lines =
                     *max_lines as f32 * font_size * appearance.line_height_ratio();
                 ConstrainedBox::new(
-                    Text::new(label.clone(), font_family, font_size)
+                    Text::new(tr(label).into_owned(), font_family, font_size)
                         .with_color(primary_color.into())
                         .autosize_text(MINIMUM_MENU_ITEM_FONT_SIZE)
                         .soft_wrap(true)
@@ -312,7 +313,7 @@ impl MenuItemLabel {
                 row.add_child(
                     Shrinkable::new(
                         1.,
-                        Text::new_inline(primary_text.clone(), font_family, font_size)
+                        Text::new_inline(tr(primary_text).into_owned(), font_family, font_size)
                             .with_color(primary_color.into())
                             .autosize_text(MINIMUM_MENU_ITEM_FONT_SIZE)
                             .finish(),
@@ -322,7 +323,7 @@ impl MenuItemLabel {
                 row.add_child(
                     Container::new(
                         Text::new_inline(
-                            secondary_text.clone(),
+                            tr(secondary_text).into_owned(),
                             font_family,
                             font_size * SECONDARY_TEXT_RATIO,
                         )
@@ -348,7 +349,7 @@ impl MenuItemLabel {
 
                 // Add primary text
                 column.add_child(
-                    Text::new_inline(primary_text.clone(), font_family, font_size)
+                    Text::new_inline(tr(primary_text).into_owned(), font_family, font_size)
                         .with_color(primary_color.into())
                         .autosize_text(MINIMUM_MENU_ITEM_FONT_SIZE)
                         .finish(),
@@ -358,7 +359,7 @@ impl MenuItemLabel {
                 column.add_child(
                     Container::new(
                         Text::new_inline(
-                            secondary_text.clone(),
+                            tr(secondary_text).into_owned(),
                             font_family,
                             font_size * SECONDARY_TEXT_RATIO,
                         )

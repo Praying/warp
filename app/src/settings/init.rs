@@ -18,10 +18,11 @@ use super::{
     AISettings, AccessibilitySettings, AliasExpansionSettings, AppEditorSettings,
     BlockVisibilitySettings, ChangelogSettings, CodeSettings, DebugSettings, EmacsBindingsSettings,
     FontSettings, FontSettingsChangedEvent, GPUSettings, InputBoxType, InputModeSettings,
-    InputSettings, LocalControlSettings, PaneSettings, SameLinePromptBlockSettings, ScrollSettings,
-    SelectionSettings, SharedObjectLimitBannerSettings, SshSettings, ThemeSettings,
-    TuiAutoupdateSettings, TuiThemeSettings, TuiVoiceSettings, TuiZeroStateSettings,
-    VimBannerSettings, WarpDrivePrivacySettings,
+    InputSettings, LanguageSettings, LocalControlSettings, PaneSettings,
+    SameLinePromptBlockSettings, ScrollSettings, SelectionSettings,
+    SharedObjectLimitBannerSettings, SshSettings, ThemeSettings, TuiAutoupdateSettings,
+    TuiThemeSettings, TuiVoiceSettings, TuiZeroStateSettings, VimBannerSettings,
+    WarpDrivePrivacySettings,
 };
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
 use crate::appearance;
@@ -80,6 +81,7 @@ pub fn register_all_settings(ctx: &mut AppContext) {
     ScrollSettings::register(ctx);
     SelectionSettings::register(ctx);
     InputModeSettings::register(ctx);
+    LanguageSettings::register(ctx);
     ThemeSettings::register(ctx);
     TuiAutoupdateSettings::register(ctx);
     TuiThemeSettings::register(ctx);
@@ -230,6 +232,8 @@ pub fn init(
     );
 
     appearance::register(ctx);
+
+    crate::i18n::init(ctx);
 
     // Set up hot-reload for the settings file. When the WarpConfig watcher
     // detects a change to settings.toml, reload preferences from disk and
