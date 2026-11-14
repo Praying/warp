@@ -1,0 +1,77 @@
+name: Build dev macOS installers
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS Apple Silicon
+    if: github.repository_owner != 'warpdotdev' && github.ref == 'refs/heads/dev'
+    runs-on: macos-15
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: 2
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout sources and bundled assets
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Install repository Rust toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin
+
+      - name: Cache Rust build dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: dev-macos-oss-aarch64
+
+      - name: Install packaging dependencies
+        run: |
+          brew install create-dmg protobuf
+          ./script/macos/install_build_deps
+          ./script/install_cargo_bundle
+          ./script/install_cargo_release_deps --no-build-deps
+
+      - name: Build self-signed OSS installer
+        id: bundle
+        run: |
+          ./script/macos/bundle --channel oss --arch aarch64 \
+            --selfsign --dmg-name-suffix "dev-aarch64-${GITHUB_SHA:0:8}"
+
+      - name: Verify and checksum installer
+        env:
+          DMG_PATH: ${{ steps.bundle.outputs.dmg_path }}
+        run: |
+          test -s "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+          cd "$(dirname "$DMG_PATH")"
+          shasum -a 256 "$(basename "$DMG_PATH")" > "$(basename "$DMG_PATH").sha256"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: WarpOss-dev-macos-aarch64-${{ github.sha }}
+          path: |
+            ${{ steps.bundle.outputs.dmg_path }}
+            ${{ steps.bundle.outputs.dmg_path }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
