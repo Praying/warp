@@ -62,8 +62,8 @@ use crate::settings::{
     CursorDisplayType, DEFAULT_MONOSPACE_FONT_NAME, EnforceMinimumContrast, FocusPaneOnHover,
     FontSettings, FontSettingsChangedEvent, GPUSettings, InputBoxType, InputModeSettings,
     InputModeState, InputSettings, InputSettingsChangedEvent, MonospaceFontName, PaneSettings,
-    ShouldDimInactivePanes, ThemeSettings, UseSystemTheme, UseThinStrokes, active_theme_kind,
-    respect_system_theme,
+    ShouldDimInactivePanes, TerminalFallbackFontName, ThemeSettings, UseSystemTheme,
+    UseThinStrokes, active_theme_kind, respect_system_theme,
 };
 use crate::terminal::block_list_viewport::InputMode;
 use crate::terminal::blockgrid_element::BlockGridElement;
@@ -466,6 +466,7 @@ pub enum AppearancePageAction {
     OpacitySliderDragged(f32),
     BlurSliderDragged(f32),
     SetFontFamily(String),
+    SetTerminalFallbackFontFamily(String),
     SetAIFontFamily(String),
     SetThinStrokes(ThinStrokes),
     SetInputMode {
@@ -535,6 +536,7 @@ pub struct AppearanceSettingsPageView {
     opacity_state: SliderStateHandle,
     blur_state: SliderStateHandle,
     font_family_dropdown: ViewHandle<FilterableDropdown<AppearancePageAction>>,
+    terminal_fallback_font_dropdown: ViewHandle<FilterableDropdown<AppearancePageAction>>,
     font_weight_dropdown: ViewHandle<Dropdown<AppearancePageAction>>,
     #[allow(dead_code)]
     thin_strokes_dropdown: ViewHandle<Dropdown<AppearancePageAction>>,
@@ -594,6 +596,15 @@ impl TypedActionView for AppearanceSettingsPageView {
             SetOpacity(value) => self.set_opacity(*value, true, ctx),
             SetBlur(value) => self.set_blur(*value, true, ctx),
             SetFontFamily(name) => self.set_font_family(name, ctx),
+            SetTerminalFallbackFontFamily(name) => {
+                FontSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(
+                        settings
+                            .terminal_fallback_font_name
+                            .set_value(name.clone(), ctx)
+                    );
+                });
+            }
             SetAIFontFamily(name) => {
                 self.set_ai_font_family(name, ctx);
                 FontSettings::handle(ctx).update(ctx, |font_settings, ctx| {
@@ -882,6 +893,10 @@ impl AppearanceSettingsPageView {
         ctx.subscribe_to_model(
             &FontSettings::handle(ctx),
             |me, font_settings, event, ctx| match event {
+                FontSettingsChangedEvent::TerminalFallbackFontName { .. } => {
+                    me.update_font_dropdown(ctx);
+                    ctx.notify();
+                }
                 FontSettingsChangedEvent::NotebookFontSize { .. }
                 | FontSettingsChangedEvent::MatchNotebookToMonospaceFontSize { .. } => {
                     let font_settings = font_settings.as_ref(ctx);
@@ -1108,6 +1123,21 @@ impl AppearanceSettingsPageView {
             dropdown
         });
 
+        let terminal_fallback_font_dropdown = ctx.add_typed_action_view(|ctx| {
+            let mut dropdown = FilterableDropdown::new(ctx);
+            dropdown.set_top_bar_max_width(FONT_FAMILY_DROPDOWN_WIDTH);
+            dropdown.set_menu_width(FONT_FAMILY_DROPDOWN_WIDTH, ctx);
+            dropdown.add_items(
+                vec![DropdownItem::new(
+                    "Automatic",
+                    AppearancePageAction::SetTerminalFallbackFontFamily(String::new()),
+                )],
+                ctx,
+            );
+            dropdown.set_selected_by_index(0, ctx);
+            dropdown
+        });
+
         let ai_font_family_dropdown = ctx.add_typed_action_view(|ctx| {
             let mut dropdown = FilterableDropdown::new(ctx);
             dropdown.set_top_bar_max_width(FONT_FAMILY_DROPDOWN_WIDTH);
@@ -1322,6 +1352,7 @@ impl AppearanceSettingsPageView {
             opacity_state: Default::default(),
             blur_state: Default::default(),
             font_family_dropdown,
+            terminal_fallback_font_dropdown,
             font_weight_dropdown,
             thin_strokes_dropdown,
             input_mode_dropdown,
@@ -1465,6 +1496,7 @@ impl AppearanceSettingsPageView {
         let font_settings = FontSettings::as_ref(ctx);
         let mut text_settings_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![
             Box::new(TerminalFontWidget::default()),
+            Box::new(TerminalFallbackFontWidget),
             Box::new(AIFontWidget::default()),
             Box::new(NotebookFontSizeWidget::default()),
         ];
@@ -2027,6 +2059,37 @@ impl AppearanceSettingsPageView {
     }
 
     fn update_font_dropdown(&mut self, ctx: &mut ViewContext<Self>) {
+        let fallback_font_name = FontSettings::as_ref(ctx)
+            .terminal_fallback_font_name
+            .value()
+            .clone();
+        let mut fallback_names = self.available_families.keys().cloned().collect::<Vec<_>>();
+        if !fallback_font_name.is_empty() && !fallback_names.contains(&fallback_font_name) {
+            fallback_names.push(fallback_font_name.clone());
+        }
+        fallback_names.sort();
+        self.terminal_fallback_font_dropdown
+            .update(ctx, |dropdown, ctx| {
+                let mut items = vec![DropdownItem::new(
+                    "Automatic",
+                    AppearancePageAction::SetTerminalFallbackFontFamily(String::new()),
+                )];
+                items.extend(fallback_names.into_iter().map(|name| {
+                    DropdownItem::new(
+                        &name,
+                        AppearancePageAction::SetTerminalFallbackFontFamily(name.clone()),
+                    )
+                }));
+                dropdown.set_items(items, ctx);
+                dropdown.set_selected_by_name(
+                    if fallback_font_name.is_empty() {
+                        "Automatic"
+                    } else {
+                        &fallback_font_name
+                    },
+                    ctx,
+                );
+            });
         let monospace_font_family = Appearance::as_ref(ctx).monospace_font_family();
         let ai_font_family = Appearance::as_ref(ctx).ai_font_family();
 
@@ -4460,6 +4523,47 @@ impl SettingsWidget for TerminalFontWidget {
 
         self.render_line_height_editor(view, appearance, &mut terminal_font_row);
         terminal_font_row.finish()
+    }
+}
+
+struct TerminalFallbackFontWidget;
+
+impl SettingsWidget for TerminalFallbackFontWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "text terminal fallback font family missing glyph chinese cjk"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        Flex::column()
+            .with_child(render_body_item_label::<AppearancePageAction>(
+                "Fallback font".to_string(),
+                None,
+                None,
+                LocalOnlyIconState::for_setting(
+                    TerminalFallbackFontName::storage_key(),
+                    TerminalFallbackFontName::sync_to_cloud(),
+                    &mut view.local_only_icon_tooltip_states.borrow_mut(),
+                    app,
+                ),
+                ToggleState::Enabled,
+                appearance,
+            ))
+            .with_child(ChildView::new(&view.terminal_fallback_font_dropdown).finish())
+            .with_child(
+                appearance
+                    .ui_builder()
+                    .span("Used for characters missing from the terminal font.".to_string())
+                    .build()
+                    .finish(),
+            )
+            .finish()
     }
 }
 

@@ -25,6 +25,16 @@ define_settings_group!(FontSettings,
             toml_path: "appearance.text.font_name",
             description: "The monospace font used in the terminal.",
         },
+        terminal_fallback_font_name: TerminalFallbackFontName {
+            type: String,
+            default: String::new(),
+            supported_platforms: SupportedPlatforms::ALL,
+            sync_to_cloud: SyncToCloud::Never,
+            surface: settings::SettingSurfaces::GUI,
+            private: false,
+            toml_path: "appearance.text.fallback_font_name",
+            description: "The preferred font for characters missing from the terminal font. Empty uses automatic fallback.",
+        },
         monospace_font_size: MonospaceFontSize {
             type: f32,
             default: DEFAULT_MONOSPACE_FONT_SIZE,
@@ -150,3 +160,7 @@ pub fn derived_notebook_font_size(font_settings: &FontSettings) -> f32 {
         *font_settings.notebook_font_size
     }
 }
+
+#[cfg(test)]
+#[path = "font_tests.rs"]
+mod tests;

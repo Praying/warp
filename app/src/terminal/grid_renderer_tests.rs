@@ -1,13 +1,38 @@
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
-use warpui::fonts::Cache as FontCache;
+use warpui::color::ColorU;
+use warpui::fonts::{Cache as FontCache, FamilyId};
 use warpui::units::{IntoLines, Lines, Pixels};
 
-use super::{CachedBackgroundColor, active_or_next_match};
+use super::{AttributedStringBuilder, CachedBackgroundColor, FontStyle, active_or_next_match};
 use crate::terminal::grid_size_util::calculate_grid_baseline_position;
 use crate::terminal::model::index::Point;
 use crate::terminal::model::selection::SelectionPoint;
 use crate::terminal::{SizeInfo, grid_renderer};
+
+#[test]
+fn fallback_font_style_runs_preserve_terminal_columns() {
+    let primary = FamilyId(0);
+    let fallback = FamilyId(1);
+    let color = ColorU::white();
+    let mut builder = AttributedStringBuilder::new(primary, 4);
+    builder.update_style(primary, FontStyle::Default, color);
+    builder.append_character('A', 0);
+    builder.update_style(fallback, FontStyle::Default, color);
+    builder.append_character('中', 1);
+    builder.update_style(primary, FontStyle::Default, color);
+    builder.append_character('B', 3);
+    let data = builder.build();
+    assert_eq!(data.line, "A中B");
+    assert_eq!(data.character_index_to_cell_map, vec![0, 1, 3]);
+    assert_eq!(data.style_runs.len(), 3);
+    assert_eq!(data.style_runs[0].0, 0..1);
+    assert_eq!(data.style_runs[0].1.font_family, primary);
+    assert_eq!(data.style_runs[1].0, 1..2);
+    assert_eq!(data.style_runs[1].1.font_family, fallback);
+    assert_eq!(data.style_runs[2].0, 2..3);
+    assert_eq!(data.style_runs[2].1.font_family, primary);
+}
 
 fn rect_from_points(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> RectF {
     RectF::from_points(vec2f(min_x, min_y), vec2f(max_x, max_y))

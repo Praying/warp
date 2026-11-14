@@ -33,6 +33,7 @@ use super::model::grid::RespectDisplayedOutput;
 use super::model::grid::grid_handler::{ContainsPoint, GridHandler, Link};
 use super::model::image_map::{ImagePlacementData, StoredImageMetadata};
 use super::model::terminal_model::RangeInModel;
+use crate::appearance::AppearanceManager;
 use crate::settings::EnforceMinimumContrast;
 use crate::terminal::grid_size_util::calculate_grid_baseline_position;
 use crate::terminal::model::ansi::{Color, CursorShape, CursorStyle};
@@ -317,6 +318,7 @@ pub fn render_grid<'a>(
     ctx: &mut PaintContext,
     app: &AppContext,
 ) {
+    glyphs.set_fallback_family(AppearanceManager::as_ref(app).terminal_fallback_font_family());
     // TODO: even if the ligatures setting is enabled, we should avoid using the ligature
     // codepath (which is known to be less performant) if the font does not
     // even support ligatures.
@@ -1009,6 +1011,7 @@ fn render_grid_with_ligatures<'a>(
     app: &AppContext,
 ) {
     let mut grid_origin = grid_origin + vec2f(padding_x.as_f32(), 0.);
+    let fallback_family = AppearanceManager::as_ref(app).terminal_fallback_font_family();
     grid_origin.set_y(grid_origin.y().round());
 
     let default_font_id = ctx
@@ -1132,8 +1135,7 @@ fn render_grid_with_ligatures<'a>(
 
     for (offset, row_idx) in visible_rows.enumerate() {
         let offset_row = start_row + offset;
-        let mut string_builder =
-            AttributedStringBuilder::new(font_family, font_family, grid.columns());
+        let mut string_builder = AttributedStringBuilder::new(font_family, grid.columns());
 
         let Some(row) = grid.row(row_idx) else {
             report_error!(
@@ -1259,8 +1261,19 @@ fn render_grid_with_ligatures<'a>(
                         obfuscate_secrets,
                     ));
 
-                    string_builder
-                        .update_style(marked_text_cell.flags.into(), cell_colors.foreground_color);
+                    let font_style: FontStyle = marked_text_cell.flags.into();
+                    let marked_text_font_family =
+                        ctx.font_cache.font_family_for_char_with_fallback(
+                            marked_text_character,
+                            font_family,
+                            fallback_family,
+                            font_style.to_properties(),
+                        );
+                    string_builder.update_style(
+                        marked_text_font_family,
+                        font_style,
+                        cell_colors.foreground_color,
+                    );
                     string_builder.append_character(marked_text_character, col);
 
                     continue;
@@ -1407,16 +1420,20 @@ fn render_grid_with_ligatures<'a>(
                 obfuscate_secrets,
             ));
 
-            string_builder.update_style(
-                if cell_type.is_filter_match() {
-                    let mut flags = cell.flags;
-                    flags.insert(Flags::BOLD);
-                    flags.into()
-                } else {
-                    cell.flags.into()
-                },
-                cell_colors.foreground_color,
+            let font_style: FontStyle = if cell_type.is_filter_match() {
+                let mut flags = cell.flags;
+                flags.insert(Flags::BOLD);
+                flags.into()
+            } else {
+                cell.flags.into()
+            };
+            let cell_font_family = ctx.font_cache.font_family_for_char_with_fallback(
+                cell.c,
+                font_family,
+                fallback_family,
+                font_style.to_properties(),
             );
+            string_builder.update_style(cell_font_family, font_style, cell_colors.foreground_color);
 
             if !cell
                 .flags
@@ -2666,7 +2683,6 @@ pub fn render_selection_cursor(
 /// Used by ligature rendering to build the attributed string for laying out text and connecting
 /// the rendered glyphs back with their appropriate offsets.
 struct AttributedStringBuilder {
-    font_family: FamilyId,
     current_style: StyleAndFont,
     current_style_start_char_index: usize,
     style_runs: Vec<(Range<usize>, StyleAndFont)>,
@@ -2677,9 +2693,8 @@ struct AttributedStringBuilder {
 }
 
 impl AttributedStringBuilder {
-    fn new(font_family: FamilyId, default_font_family: FamilyId, columns: usize) -> Self {
+    fn new(default_font_family: FamilyId, columns: usize) -> Self {
         Self {
-            font_family,
             current_style: StyleAndFont::new(
                 default_font_family,
                 Properties::default(),
@@ -2715,9 +2730,14 @@ impl AttributedStringBuilder {
     /// Update the style information for the current position.
     ///
     /// This will flush the cached style into the style runs list whenever the style changes.
-    fn update_style(&mut self, font_style: FontStyle, foreground_color: ColorU) {
+    fn update_style(
+        &mut self,
+        font_family: FamilyId,
+        font_style: FontStyle,
+        foreground_color: ColorU,
+    ) {
         let cell_style = StyleAndFont {
-            font_family: self.font_family,
+            font_family,
             properties: font_style.to_properties(),
             style: TextStyle {
                 foreground_color: Some(foreground_color),
