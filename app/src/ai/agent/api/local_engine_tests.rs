@@ -142,6 +142,84 @@ fn stream_opens_with_init_task_and_user_query_echo() {
 }
 
 #[test]
+fn stream_opening_persists_tool_results_for_the_next_request() {
+    let mut request = custom_provider_request("custom-llama");
+    request.task_context = Some(api::request::TaskContext {
+        tasks: vec![api::Task {
+            id: "root".to_owned(),
+            messages: vec![message(api::message::Message::ToolCall(
+                api::message::ToolCall {
+                    tool_call_id: "call-1".to_owned(),
+                    tool: Some(api::message::tool_call::Tool::RunShellCommand(
+                        api::message::tool_call::RunShellCommand {
+                            command: "ls".to_owned(),
+                            ..Default::default()
+                        },
+                    )),
+                },
+            ))],
+            ..Default::default()
+        }],
+    });
+    request.input = Some(api::request::Input {
+        r#type: Some(api::request::input::Type::UserInputs(
+            api::request::input::UserInputs {
+                inputs: vec![api::request::input::user_inputs::UserInput {
+                    input: Some(
+                        api::request::input::user_inputs::user_input::Input::ToolCallResult(
+                            api::request::input::ToolCallResult {
+                                tool_call_id: "call-1".to_owned(),
+                                result: Some(
+                                    api::request::input::tool_call_result::Result::RunShellCommand(
+                                        api::RunShellCommandResult::default(),
+                                    ),
+                                ),
+                            },
+                        ),
+                    ),
+                }],
+            },
+        )),
+        ..Default::default()
+    });
+
+    let engine = prepare(&request, None).unwrap();
+    let Some(api::response_event::Type::ClientActions(actions)) = engine.opening_event().r#type
+    else {
+        panic!("expected client actions");
+    };
+    let Some(api::client_action::Action::AddMessagesToTask(add_messages)) = actions
+        .actions
+        .first()
+        .and_then(|action| action.action.as_ref())
+    else {
+        panic!("expected a tool result message action");
+    };
+    assert!(matches!(
+        add_messages.messages.first().and_then(|message| message.message.as_ref()),
+        Some(api::message::Message::ToolCallResult(result))
+            if result.tool_call_id == "call-1"
+    ));
+
+    let mut task = request
+        .task_context
+        .take()
+        .unwrap()
+        .tasks
+        .into_iter()
+        .next()
+        .unwrap();
+    task.messages.extend(add_messages.messages.clone());
+    let next_request = custom_provider_request("custom-llama");
+    let history = build_chat_history(&[task], next_request.input.as_ref().unwrap());
+    assert!(
+        history
+            .iter()
+            .any(|message| matches!(message, ChatMessage::ToolResult { id, .. } if id == "call-1"))
+    );
+}
+
+#[test]
 fn chat_history_flattens_messages_and_new_input() {
     let task = api::Task {
         id: "root".to_owned(),
@@ -232,6 +310,7 @@ fn streams_completion_from_an_openai_compatible_endpoint() {
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hi \"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"there\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":30,\"total_tokens\":150,\"prompt_tokens_details\":{\"cached_tokens\":100}}}\n\n",
             "data: [DONE]\n\n",
         );
         let response = format!(
@@ -262,8 +341,12 @@ fn streams_completion_from_an_openai_compatible_endpoint() {
         ..Default::default()
     });
 
+    let custom_model = ai::api_keys::CustomEndpointModel {
+        context_window: Some(1000),
+        ..Default::default()
+    };
     let events: Vec<_> = futures::executor::block_on(async {
-        generate_local_multi_agent_output(&request, None)
+        generate_local_multi_agent_output(&request, Some(&custom_model))
             .then(|event| async move { event })
             .collect()
             .await
@@ -308,6 +391,14 @@ fn streams_completion_from_an_openai_compatible_endpoint() {
         .flatten()
         .collect();
     assert_eq!(text, "Hi there");
+    let Some(api::response_event::Type::Finished(finished)) =
+        events.last().unwrap().as_ref().unwrap().r#type.as_ref()
+    else {
+        panic!("expected a finished event");
+    };
+    let usage = finished.conversation_usage_metadata.as_ref().unwrap();
+    assert_eq!(usage.total_input_tokens, 120);
+    assert!((usage.context_window_usage - 0.15).abs() < f32::EPSILON);
     assert!(matches!(
         events
             .last()
@@ -340,10 +431,11 @@ fn streams_completion_from_an_anthropic_endpoint() {
         );
 
         let body = concat!(
-            "data: {\"type\":\"message_start\"}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":20,\"cache_creation_input_tokens\":40,\"cache_read_input_tokens\":60,\"output_tokens\":1}}}\n\n",
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}\n\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Bonjour\"}}\n\n",
             "data: {\"type\":\"content_block_stop\"}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":30}}\n\n",
             "data: {\"type\":\"message_stop\"}\n\n",
         );
         let response = format!(
@@ -355,8 +447,12 @@ fn streams_completion_from_an_anthropic_endpoint() {
     });
 
     let request = anthropic_request(&format!("http://127.0.0.1:{port}"));
+    let custom_model = ai::api_keys::CustomEndpointModel {
+        context_window: Some(2000),
+        ..Default::default()
+    };
     let events: Vec<_> = futures::executor::block_on(async {
-        generate_local_multi_agent_output(&request, None)
+        generate_local_multi_agent_output(&request, Some(&custom_model))
             .then(|event| async move { event })
             .collect()
             .await
@@ -388,6 +484,14 @@ fn streams_completion_from_an_anthropic_endpoint() {
         .flatten()
         .collect();
     assert_eq!(text, "Bonjour");
+    let Some(api::response_event::Type::Finished(finished)) =
+        events.last().unwrap().as_ref().unwrap().r#type.as_ref()
+    else {
+        panic!("expected a finished event");
+    };
+    let usage = finished.conversation_usage_metadata.as_ref().unwrap();
+    assert_eq!(usage.total_input_tokens, 120);
+    assert!((usage.context_window_usage - 0.075).abs() < f32::EPSILON);
 }
 
 fn anthropic_request(base_url: &str) -> api::Request {
@@ -460,6 +564,108 @@ fn custom_model_settings_reach_the_streaming_request() {
         "{received_request}"
     );
     assert!(!events.is_empty());
+}
+
+fn finished_usage(engine: &LocalEngine) -> Option<ConversationUsageMetadata> {
+    let Some(api::response_event::Type::Finished(finished)) = engine.done_event().r#type else {
+        panic!("expected a finished event");
+    };
+    finished.conversation_usage_metadata
+}
+
+#[test]
+fn context_usage_uses_latest_cumulative_counts_and_current_model_limit() {
+    let request = custom_provider_request("custom-llama");
+    for context_window in [1000, 2000] {
+        let custom_model = ai::api_keys::CustomEndpointModel {
+            context_window: Some(context_window),
+            ..Default::default()
+        };
+        let mut engine = prepare(&request, Some(&custom_model)).unwrap();
+        engine.chunk_event(llm::StreamChunk::Usage {
+            input_tokens: Some(100),
+            output_tokens: Some(1),
+        });
+        engine.chunk_event(llm::StreamChunk::Text("hello".to_owned()));
+        engine.chunk_event(llm::StreamChunk::Usage {
+            input_tokens: None,
+            output_tokens: Some(10),
+        });
+        engine.chunk_event(llm::StreamChunk::Usage {
+            input_tokens: None,
+            output_tokens: Some(50),
+        });
+        let usage = finished_usage(&engine).unwrap();
+        assert_eq!(usage.total_input_tokens, 100);
+        assert_eq!(usage.context_window_usage, 150.0 / context_window as f32);
+    }
+}
+
+#[test]
+fn context_usage_estimates_input_and_output_when_provider_omits_usage() {
+    let request = custom_provider_request("custom-llama");
+    let custom_model = ai::api_keys::CustomEndpointModel {
+        context_window: Some(100_000),
+        ..Default::default()
+    };
+    let mut engine = prepare(&request, Some(&custom_model)).unwrap();
+    let initial = finished_usage(&engine).unwrap();
+    assert!(initial.total_input_tokens > 100);
+    engine.chunk_event(llm::StreamChunk::Text("你".to_owned()));
+    engine.chunk_event(llm::StreamChunk::Text("好".to_owned()));
+    let usage = finished_usage(&engine).unwrap();
+    assert_eq!(usage.total_input_tokens, initial.total_input_tokens);
+    assert_eq!(
+        usage.context_window_usage,
+        (initial.total_input_tokens + 2) as f32 / 100_000.0
+    );
+}
+
+#[test]
+fn context_usage_does_not_invent_a_window_and_clamps_overflow() {
+    let request = custom_provider_request("custom-llama");
+    for context_window in [None, Some(0)] {
+        let custom_model = ai::api_keys::CustomEndpointModel {
+            context_window,
+            ..Default::default()
+        };
+        let engine = prepare(&request, Some(&custom_model)).unwrap();
+        assert!(finished_usage(&engine).is_none());
+    }
+    let custom_model = ai::api_keys::CustomEndpointModel {
+        context_window: Some(1000),
+        ..Default::default()
+    };
+    let mut engine = prepare(&request, Some(&custom_model)).unwrap();
+    engine.chunk_event(llm::StreamChunk::Usage {
+        input_tokens: Some(1100),
+        output_tokens: Some(100),
+    });
+    assert_eq!(finished_usage(&engine).unwrap().context_window_usage, 1.0);
+}
+
+#[test]
+fn context_usage_estimate_excludes_truncated_history() {
+    let mut request = custom_provider_request("custom-llama");
+    let custom_model = ai::api_keys::CustomEndpointModel {
+        context_window: Some(1000),
+        ..Default::default()
+    };
+    let baseline = finished_usage(&prepare(&request, Some(&custom_model)).unwrap()).unwrap();
+    request.task_context = Some(api::request::TaskContext {
+        tasks: vec![Task {
+            id: "root".to_owned(),
+            messages: vec![user_query_message(
+                "root",
+                "old-request",
+                &"old context".repeat(1000),
+            )],
+            ..Default::default()
+        }],
+    });
+    let usage = finished_usage(&prepare(&request, Some(&custom_model)).unwrap()).unwrap();
+    assert_eq!(usage.total_input_tokens, baseline.total_input_tokens);
+    assert_eq!(usage.context_window_usage, baseline.context_window_usage);
 }
 
 #[test]

@@ -103,6 +103,30 @@ pub(super) struct ToolCallRequest {
 pub(super) enum StreamChunk {
     Text(String),
     ToolCall(ToolCallRequest),
+    Usage {
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    },
+}
+
+pub(super) fn estimate_input_tokens(request: &StreamingRequest) -> u64 {
+    let messages = match request.model.schema {
+        api::request::settings::custom_model_providers::CustomEndpointSchema::AnthropicMessages => {
+            serde_json::json!({
+                "system": request.system_prompt,
+                "messages": anthropic::anthropic_messages(&request.messages),
+                "tools": anthropic::anthropic_tools(),
+            })
+        }
+        api::request::settings::custom_model_providers::CustomEndpointSchema::OpenaiChatCompletions
+        | api::request::settings::custom_model_providers::CustomEndpointSchema::OpenaiResponses => {
+            serde_json::json!({
+                "messages": openai::openai_messages(request),
+                "tools": tool_specs(),
+            })
+        }
+    };
+    messages.to_string().len().div_ceil(4) as u64
 }
 
 impl ToolCallRequest {
@@ -661,14 +685,22 @@ mod openai {
 
         let mut body_with_tools = body.clone();
         body_with_tools["tools"] = tool_specs();
-        let first = chunk_stream(url.clone(), model.clone(), headers.clone(), body_with_tools);
+        let mut body_with_usage = body_with_tools.clone();
+        body_with_usage["stream_options"] = serde_json::json!({"include_usage": true});
+        let first = chunk_stream(url.clone(), model.clone(), headers.clone(), body_with_usage);
         retry_once(
             first,
             EndpointError::is_bad_request,
             Box::new(move || {
-                chunk_stream(url, model, headers, body)
-                    .map(|result| result.map_err(|error| error.message()))
-                    .boxed()
+                retry_once(
+                    chunk_stream(url.clone(), model.clone(), headers.clone(), body_with_tools),
+                    EndpointError::is_bad_request,
+                    Box::new(move || {
+                        chunk_stream(url, model, headers, body)
+                            .map(|result| result.map_err(|error| error.message()))
+                            .boxed()
+                    }),
+                )
             }),
         )
     }
@@ -706,6 +738,16 @@ mod openai {
     impl Accumulator {
         pub(super) fn map_payload(&mut self, payload: &serde_json::Value) -> Vec<StreamChunk> {
             let mut chunks = Vec::new();
+            if let Some(usage) = payload.get("usage").filter(|usage| usage.is_object()) {
+                chunks.push(StreamChunk::Usage {
+                    input_tokens: usage
+                        .get("prompt_tokens")
+                        .and_then(serde_json::Value::as_u64),
+                    output_tokens: usage
+                        .get("completion_tokens")
+                        .and_then(serde_json::Value::as_u64),
+                });
+            }
             let Some(choice) = payload
                 .get("choices")
                 .and_then(serde_json::Value::as_array)
@@ -938,7 +980,7 @@ mod anthropic {
         Some(budget.clamp(1024, max_tokens.saturating_sub(1024).max(1024)))
     }
 
-    fn anthropic_tools() -> serde_json::Value {
+    pub(super) fn anthropic_tools() -> serde_json::Value {
         let specs = tool_specs().as_array().cloned().unwrap_or_default();
         specs
             .iter()
@@ -1033,6 +1075,37 @@ mod anthropic {
         pub(super) fn map_payload(&mut self, payload: &serde_json::Value) -> Vec<StreamChunk> {
             let mut chunks = Vec::new();
             match payload.get("type").and_then(serde_json::Value::as_str) {
+                Some("message_start") | Some("message_delta") => {
+                    if let Some(usage) = payload
+                        .pointer("/message/usage")
+                        .or_else(|| payload.get("usage"))
+                    {
+                        let input_tokens = usage
+                            .get("input_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                            .map(|tokens| {
+                                tokens
+                                    .saturating_add(
+                                        usage
+                                            .get("cache_creation_input_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .unwrap_or_default(),
+                                    )
+                                    .saturating_add(
+                                        usage
+                                            .get("cache_read_input_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .unwrap_or_default(),
+                                    )
+                            });
+                        chunks.push(StreamChunk::Usage {
+                            input_tokens,
+                            output_tokens: usage
+                                .get("output_tokens")
+                                .and_then(serde_json::Value::as_u64),
+                        });
+                    }
+                }
                 Some("content_block_start") => {
                     let block = payload.get("content_block");
                     if block

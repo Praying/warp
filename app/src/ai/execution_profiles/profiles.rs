@@ -94,7 +94,18 @@ enum ProfileSource {
 
 impl ProfileSource {
     /// Resolves the persistence backend for this launch.
-    fn for_launch_mode(launch_mode: &LaunchMode) -> Self {
+    fn for_launch_mode(launch_mode: &LaunchMode, ctx: &AppContext) -> Self {
+        if matches!(
+            launch_mode,
+            LaunchMode::App { .. } | LaunchMode::Test { .. }
+        ) && AuthStateProvider::as_ref(ctx)
+            .get()
+            .using_local_credentials()
+        {
+            return Self::SettingsCollection {
+                migrates_legacy_cloud_profiles: false,
+            };
+        }
         if !file_backed_execution_profiles_enabled(launch_mode) {
             return Self::LegacyCloudObjects;
         }
@@ -256,31 +267,33 @@ impl AIExecutionProfilesModel {
     #[allow(unused_variables)]
     pub(crate) fn new(launch_mode: &LaunchMode, ctx: &mut ModelContext<Self>) -> Self {
         // Resolve the persistence backend before constructing any source-specific state.
-        let source = ProfileSource::for_launch_mode(launch_mode);
+        let source = ProfileSource::for_launch_mode(launch_mode, ctx);
         let uses_file_backed_profiles = source.is_settings_collection();
         let imports_legacy_profiles = source.imports_legacy_profiles();
 
-        // A TUI with no explicit collection seeds its default from the existing
-        // local scalar settings, then uses only the collection. Eval builds never launch the
-        // TUI and never read legacy settings, so this seeding is compiled out for them.
+        // Non-migrating settings backends seed their default from local scalar settings. Eval
+        // builds never read legacy settings, so this seeding is compiled out for them.
         #[cfg(not(feature = "agent_mode_evals"))]
         let last_settings_profiles = {
             let mut last_settings_profiles =
                 AISettings::as_ref(ctx).execution_profiles.value().clone();
-            if matches!(launch_mode, LaunchMode::Tui { .. })
+            if uses_file_backed_profiles
+                && !imports_legacy_profiles
                 && !AISettings::as_ref(ctx)
                     .execution_profiles
                     .is_value_explicitly_set()
             {
                 let mut profiles = ExecutionProfilesConfig::default();
-                profiles.insert(
-                    ExecutionProfileId::default_profile(),
-                    super::create_default_for_tui_from_legacy_settings(ctx),
-                );
+                let default_profile = if matches!(launch_mode, LaunchMode::Tui { .. }) {
+                    super::create_default_for_tui_from_legacy_settings(ctx)
+                } else {
+                    super::create_default_from_legacy_settings(ctx)
+                };
+                profiles.insert(ExecutionProfileId::default_profile(), default_profile);
                 if let Err(error) = AISettings::handle(ctx).update(ctx, |settings, ctx| {
                     settings.execution_profiles.set_value(profiles.clone(), ctx)
                 }) {
-                    report_error!(error.context("Failed to initialize TUI execution profiles"));
+                    report_error!(error.context("Failed to initialize local execution profiles"));
                 } else {
                     last_settings_profiles = profiles;
                 }
