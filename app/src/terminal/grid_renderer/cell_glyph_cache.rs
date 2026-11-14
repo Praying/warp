@@ -14,17 +14,29 @@ use warpui::text_layout::{DEFAULT_TOP_BOTTOM_RATIO, StyleAndFont};
 /// performance reasons (avoid allocating strings when we don't need to!).
 #[derive(Default)]
 pub struct CellGlyphCache {
+    fallback_family: Option<FamilyId>,
     glyph_cache: HashMap<(char, FontId), Option<(GlyphId, FontId)>>,
     string_cache: HashMap<(String, FontId), Option<(GlyphId, FontId)>>,
 }
 
 impl CellGlyphCache {
+    pub(super) fn set_fallback_family(&mut self, fallback_family: Option<FamilyId>) {
+        if self.fallback_family != fallback_family {
+            self.fallback_family = fallback_family;
+            self.glyph_cache.clear();
+            self.string_cache.clear();
+        }
+    }
+
     pub(super) fn glyph_for_char(
         &mut self,
         char: char,
         font_id: FontId,
         font_cache: &FontCache,
     ) -> Option<(GlyphId, FontId)> {
+        let font_id = font_cache
+            .preferred_fallback_font_for_char(char, font_id, self.fallback_family)
+            .unwrap_or(font_id);
         *self
             .glyph_cache
             .entry((char, font_id))
@@ -46,6 +58,12 @@ impl CellGlyphCache {
             .string_cache
             .entry((string.to_owned(), font_id))
             .or_insert_with(|| {
+                let font_family = font_cache.font_family_for_char_with_fallback(
+                    string.chars().next()?,
+                    font_family,
+                    self.fallback_family,
+                    properties,
+                );
                 // Calculate the length of total characters in the string.
                 let run_length_chars = string.chars().count();
                 let line = ctx.text_layout_cache.layout_line(

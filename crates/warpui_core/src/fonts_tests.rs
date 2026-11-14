@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Result, anyhow};
 use pathfinder_geometry::rect::RectI;
 use pathfinder_geometry::vector::{Vector2F, Vector2I, vec2i};
@@ -49,11 +51,16 @@ fn test_subpixel_alignment_computation() {
 struct EmWidthFontDB {
     bounds: Option<RectI>,
     advance: Option<Vector2I>,
+    glyphs: Option<HashMap<(FontId, char), GlyphId>>,
 }
 
 impl EmWidthFontDB {
     fn cache(bounds: Option<RectI>, advance: Option<Vector2I>) -> Cache {
-        Cache::new(Box::new(Self { bounds, advance }))
+        Cache::new(Box::new(Self {
+            bounds,
+            advance,
+            glyphs: None,
+        }))
     }
 }
 
@@ -83,11 +90,18 @@ impl platform::FontDB for EmWidthFontDB {
     }
 
     fn fallback_fonts(&self, _ch: char, _font_id: FontId) -> Vec<FontId> {
-        unimplemented!()
+        vec![FontId(2)]
     }
 
-    fn select_font(&self, _family_id: FamilyId, _properties: Properties) -> FontId {
-        FontId(0)
+    fn select_font(&self, family_id: FamilyId, properties: Properties) -> FontId {
+        FontId(
+            family_id.0
+                + if properties.weight == Weight::Bold {
+                    10
+                } else {
+                    0
+                },
+        )
     }
 
     fn font_metrics(&self, _font_id: FontId) -> Metrics {
@@ -136,8 +150,11 @@ impl platform::FontDB for EmWidthFontDB {
         unimplemented!()
     }
 
-    fn glyph_for_char(&self, _font_id: FontId, _char: char) -> Option<GlyphId> {
-        Some(0)
+    fn glyph_for_char(&self, font_id: FontId, char: char) -> Option<GlyphId> {
+        match &self.glyphs {
+            Some(glyphs) => glyphs.get(&(font_id, char)).copied(),
+            None => Some(0),
+        }
     }
 
     fn family_id_for_name(&self, _name: &str) -> Option<FamilyId> {
@@ -178,4 +195,113 @@ fn em_width_falls_back_when_horizontal_advance_is_zero() {
     let cache = EmWidthFontDB::cache(None, Some(vec2i(0, 0)));
 
     assert_eq!(cache.em_width(FamilyId(0), 16.0), 16.0);
+}
+
+fn fallback_font_cache() -> Cache {
+    Cache::new(Box::new(EmWidthFontDB {
+        bounds: None,
+        advance: None,
+        glyphs: Some(HashMap::from([
+            ((FontId(0), 'A'), 1),
+            ((FontId(1), 'A'), 2),
+            ((FontId(1), '中'), 3),
+            ((FontId(2), '中'), 4),
+            ((FontId(2), '🙂'), 5),
+            ((FontId(11), '中'), 6),
+        ])),
+    }))
+}
+
+#[test]
+fn preferred_fallback_preserves_primary_glyphs() {
+    let cache = fallback_font_cache();
+    assert_eq!(
+        cache.font_family_for_char_with_fallback(
+            'A',
+            FamilyId(0),
+            Some(FamilyId(1)),
+            Properties::default()
+        ),
+        FamilyId(0),
+    );
+}
+
+#[test]
+fn preferred_fallback_overrides_cached_system_fallback_without_changing_other_text() {
+    let cache = fallback_font_cache();
+    assert_eq!(
+        cache.glyph_for_char(FontId(0), '中', true),
+        Some((4, FontId(2)))
+    );
+    let family = cache.font_family_for_char_with_fallback(
+        '中',
+        FamilyId(0),
+        Some(FamilyId(1)),
+        Properties::default(),
+    );
+    assert_eq!(family, FamilyId(1));
+    assert_eq!(
+        cache.glyph_for_char(cache.select_font(family, Properties::default()), '中', true),
+        Some((3, FontId(1)))
+    );
+    assert_eq!(
+        cache.glyph_for_char(FontId(0), '中', true),
+        Some((4, FontId(2)))
+    );
+}
+
+#[test]
+fn preferred_fallback_leaves_uncovered_characters_to_automatic_fallback() {
+    let cache = fallback_font_cache();
+    assert_eq!(
+        cache.glyph_for_char(FontId(1), '🙂', true),
+        Some((5, FontId(2)))
+    );
+    let family = cache.font_family_for_char_with_fallback(
+        '🙂',
+        FamilyId(0),
+        Some(FamilyId(1)),
+        Properties::default(),
+    );
+    assert_eq!(family, FamilyId(0));
+    assert_eq!(
+        cache.glyph_for_char(cache.select_font(family, Properties::default()), '🙂', true),
+        Some((5, FontId(2)))
+    );
+}
+
+#[test]
+fn preferred_fallback_can_be_switched_and_disabled() {
+    let cache = fallback_font_cache();
+    for (fallback, expected) in [
+        (Some(FamilyId(1)), FamilyId(1)),
+        (Some(FamilyId(2)), FamilyId(2)),
+        (None, FamilyId(0)),
+    ] {
+        assert_eq!(
+            cache.font_family_for_char_with_fallback(
+                '中',
+                FamilyId(0),
+                fallback,
+                Properties::default()
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn preferred_fallback_uses_requested_font_weight() {
+    let cache = fallback_font_cache();
+    let properties = Properties {
+        weight: Weight::Bold,
+        ..Properties::default()
+    };
+    let family =
+        cache.font_family_for_char_with_fallback('中', FamilyId(0), Some(FamilyId(1)), properties);
+    assert_eq!(family, FamilyId(1));
+    assert_eq!(
+        cache.glyph_for_char(cache.select_font(family, properties), '中', true),
+        Some((6, FontId(11)))
+    );
 }
