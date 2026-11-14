@@ -2362,9 +2362,8 @@ pub fn authenticate_then_execute(
     let can_refresh_user = auth_state
         .credentials()
         .is_some_and(|credentials| credentials.login_token().is_some());
-    let Some(authentication) = command_authentication(pending_api_key, can_refresh_user)
-    else {
-        return Err(anyhow::anyhow!("You are not logged in. {}", login_hint));
+    let Some(authentication) = command_authentication(pending_api_key, can_refresh_user) else {
+        return Err(anyhow::anyhow!("{}", login_hint));
     };
 
     // On staging the warp-server is fronted by IAP, so establish an IAP token
