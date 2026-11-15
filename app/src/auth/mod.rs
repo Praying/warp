@@ -342,8 +342,8 @@ pub fn log_out(app: &mut AppContext) {
     let settings_profiles_are_explicit = AISettings::as_ref(app)
         .execution_profiles
         .is_value_explicitly_set();
-    AIExecutionProfilesModel::handle(app).update(app, |profiles, _| {
-        profiles.reset(settings_profiles_are_explicit);
+    AIExecutionProfilesModel::handle(app).update(app, |profiles, ctx| {
+        profiles.reset(settings_profiles_are_explicit, ctx);
     });
     LLMPreferences::handle(app).update(app, |preferences, _| {
         preferences.reset_session_overrides();

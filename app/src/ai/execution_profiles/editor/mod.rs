@@ -42,7 +42,7 @@ use crate::pane_group::pane::view;
 use crate::pane_group::{BackingView, PaneConfiguration, PaneEvent};
 use crate::settings::{AISettings, AISettingsChangedEvent, AgentModeCommandExecutionPredicate};
 use crate::ui_components::icons::Icon;
-use crate::view_components::action_button::{ActionButton, DangerSecondaryTheme};
+use crate::view_components::action_button::{ActionButton, DangerSecondaryTheme, SecondaryTheme};
 use crate::view_components::dropdown::DropdownAction;
 use crate::view_components::{
     Dropdown, DropdownItem, FilterableDropdown, SubmittableTextInput, SubmittableTextInputEvent,
@@ -231,6 +231,7 @@ pub enum ExecutionProfileEditorViewAction {
         id: uuid::Uuid,
     },
     DeleteProfile,
+    SetAsDefaultProfile,
     SetPlanAutoSync {
         enabled: bool,
     },
@@ -275,6 +276,7 @@ pub struct ExecutionProfileEditorView {
     mcp_denylist_mouse_state_handles: Vec<MouseStateHandle>,
     profile_name_editor: ViewHandle<EditorView>,
     delete_button: ViewHandle<ActionButton>,
+    set_as_default_button: ViewHandle<ActionButton>,
     tooltip_mouse_state_handles: TooltipMouseStateHandles,
     plan_auto_sync_switch: SwitchStateHandle,
     web_search_switch: SwitchStateHandle,
@@ -649,6 +651,16 @@ impl ExecutionProfileEditorView {
                 })
         });
 
+        let set_as_default_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Set as default profile", SecondaryTheme)
+                .with_icon(Icon::Check)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(
+                        ExecutionProfileEditorViewAction::SetAsDefaultProfile,
+                    );
+                })
+        });
+
         let mut view = Self {
             profile_id,
             self_handle,
@@ -688,6 +700,7 @@ impl ExecutionProfileEditorView {
             mcp_denylist_mouse_state_handles,
             profile_name_editor,
             delete_button,
+            set_as_default_button,
             tooltip_mouse_state_handles: Default::default(),
             plan_auto_sync_switch: Default::default(),
             web_search_switch: Default::default(),
@@ -1386,8 +1399,12 @@ impl ExecutionProfileEditorView {
         ctx: &mut ViewContext<Self>,
     ) {
         profile_name_editor.update(ctx, |editor, ctx| {
-            let display_name = if profile_data.is_default_profile {
-                "Default".to_string()
+            let display_name = if profile_data.name.trim().is_empty() {
+                if profile_data.is_default_profile {
+                    "Default".to_string()
+                } else {
+                    "Untitled".to_string()
+                }
             } else {
                 profile_data.name.clone()
             };
@@ -1397,10 +1414,6 @@ impl ExecutionProfileEditorView {
             let current_text = editor.buffer_text(ctx);
             if current_text != display_name {
                 editor.set_buffer_text(&display_name, ctx);
-            }
-
-            if profile_data.is_default_profile {
-                editor.set_interaction_state(InteractionState::Disabled, ctx);
             }
         });
     }
@@ -1570,13 +1583,11 @@ impl View for ExecutionProfileEditorView {
         let permissions = BlocklistAIPermissions::as_ref(app);
         let scope = self.team_context(app);
         let profile_data = permissions.permissions_profile_for_id(&self.profile_id, &scope, app);
+        let is_current_default =
+            self.profile_id == AIExecutionProfilesModel::as_ref(app).default_profile_id();
 
         let mut column = Flex::column()
-            .with_child(render_header_section(
-                appearance,
-                &self.profile_name_editor,
-                profile_data.is_default_profile,
-            ))
+            .with_child(render_header_section(appearance, &self.profile_name_editor))
             .with_child(render_models_section(appearance, self, app))
             .with_child(render_permissions_section(
                 appearance,
@@ -1585,8 +1596,18 @@ impl View for ExecutionProfileEditorView {
                 app,
             ));
 
-        if !profile_data.is_default_profile {
-            column.add_child(ChildView::new(&self.delete_button).finish());
+        if !is_current_default {
+            let mut footer =
+                Flex::row().with_child(ChildView::new(&self.set_as_default_button).finish());
+            // The built-in default profile cannot be removed, only demoted.
+            if !self.profile_id.is_default() {
+                footer.add_child(
+                    Container::new(ChildView::new(&self.delete_button).finish())
+                        .with_margin_left(8.)
+                        .finish(),
+                );
+            }
+            column.add_child(footer.finish());
         }
 
         let content = Container::new(column.finish())
@@ -1795,6 +1816,12 @@ impl TypedActionView for ExecutionProfileEditorView {
             ExecutionProfileEditorViewAction::DeleteProfile => {
                 AIExecutionProfilesModel::handle(ctx).update(ctx, |profiles_model, ctx| {
                     profiles_model.delete_profile(&self.profile_id, ctx);
+                });
+                ctx.emit(ExecutionProfileEditorViewEvent::Pane(PaneEvent::Close));
+            }
+            ExecutionProfileEditorViewAction::SetAsDefaultProfile => {
+                AIExecutionProfilesModel::handle(ctx).update(ctx, |profiles_model, ctx| {
+                    profiles_model.set_default_profile(&self.profile_id, ctx);
                 });
                 ctx.emit(ExecutionProfileEditorViewEvent::Pane(PaneEvent::Close));
             }

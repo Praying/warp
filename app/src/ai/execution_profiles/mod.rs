@@ -242,11 +242,12 @@ impl StringModel for AIExecutionProfile {
     }
 
     fn display_name(&self) -> String {
-        // Handles case where default profile was previously created and named "Untitled"
-        if self.is_default_profile {
-            "Default".to_string()
-        } else if self.name.trim().is_empty() {
-            "Untitled".to_string()
+        if self.name.trim().is_empty() {
+            if self.is_default_profile {
+                "Default".to_string()
+            } else {
+                "Untitled".to_string()
+            }
         } else {
             self.name.clone()
         }

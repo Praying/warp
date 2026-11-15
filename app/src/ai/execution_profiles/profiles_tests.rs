@@ -230,6 +230,84 @@ fn local_profiles_work_without_cloud_with_file_backed_gui_flag() {
     assert_local_profiles_work_without_cloud(true);
 }
 
+#[test]
+fn set_default_profile_points_at_existing_profile_without_removing_it() {
+    let _guard = FeatureFlag::FileBackedExecutionProfiles.override_enabled(true);
+    App::test((), |mut app| async move {
+        let auth = AuthStateProvider::new_logged_out_for_test();
+        auth.get().set_user(Some(User::local()));
+        auth.get().set_credentials(Some(Credentials::Local));
+        install_singletons(&mut app, auth);
+        let profiles = app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        let profile_id = profiles
+            .update(&mut app, |model, ctx| model.create_profile(ctx))
+            .expect("local sessions must create profiles without cloud initialization");
+        profiles.update(&mut app, |model, ctx| {
+            model.set_profile_name(&profile_id, "Custom", ctx);
+            model.set_base_model(&profile_id, Some(LLMId::from("custom-local")), ctx);
+            model.set_default_profile(&profile_id, ctx);
+        });
+        profiles.read(&app, |model, ctx| {
+            let default = model.default_profile(ctx);
+            assert_eq!(default.id, profile_id);
+            assert_eq!(default.data().name, "Custom");
+            assert_eq!(default.data().base_model, Some(LLMId::from("custom-local")));
+            // Both the chosen profile and the previous default remain listed.
+            assert!(model.get_all_profile_ids().contains(&profile_id));
+            assert!(
+                model
+                    .get_all_profile_ids()
+                    .contains(&ExecutionProfileId::default_profile())
+            );
+            assert_eq!(model.get_all_profile_ids().len(), 2);
+        });
+
+        // The pointer survives a model restart.
+        let restored = app
+            .add_model(|ctx| AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx));
+        restored.read(&app, |model, ctx| {
+            assert_eq!(model.default_profile_id(), profile_id);
+            assert_eq!(model.default_profile(ctx).data().name, "Custom");
+        });
+
+        // The current default cannot be deleted.
+        restored.update(&mut app, |model, ctx| {
+            model.delete_profile(&profile_id, ctx);
+        });
+        restored.read(&app, |model, _| {
+            assert!(model.get_all_profile_ids().contains(&profile_id));
+        });
+
+        // Pointing back at the built-in default restores it without deleting
+        // the custom profile.
+        restored.update(&mut app, |model, ctx| {
+            model.set_default_profile(&ExecutionProfileId::default_profile(), ctx);
+        });
+        restored.read(&app, |model, ctx| {
+            assert_eq!(
+                model.default_profile_id(),
+                ExecutionProfileId::default_profile()
+            );
+            assert_eq!(model.default_profile(ctx).data().name, "Default");
+            assert!(model.get_all_profile_ids().contains(&profile_id));
+        });
+
+        // An unknown target is ignored and keeps the current default.
+        let unknown = ExecutionProfileId::parse("profile-does-not-exist").unwrap();
+        restored.update(&mut app, |model, ctx| {
+            model.set_default_profile(&unknown, ctx);
+        });
+        restored.read(&app, |model, _| {
+            assert_eq!(
+                model.default_profile_id(),
+                ExecutionProfileId::default_profile()
+            );
+        });
+    });
+}
+
 fn complete_cloud_initial_load(app: &mut App) {
     UpdateManager::handle(app).update(app, |update_manager, ctx| {
         update_manager.mock_initial_load(InitialLoadResponse::default(), ctx);
@@ -1265,7 +1343,7 @@ fn reset_without_explicit_collection_reimports_the_next_accounts_legacy_profile(
         let profile_model = app.add_singleton_model(|ctx| {
             AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
         });
-        profile_model.update(&mut app, |model, _| model.reset(false));
+        profile_model.update(&mut app, |model, ctx| model.reset(false, ctx));
 
         let default_profile_id = profile_model.read(&app, |model, _| model.default_profile_id());
         profile_model.update(&mut app, |model, ctx| {
@@ -1391,7 +1469,7 @@ fn profile_sources_preserve_state_across_migration_and_rollout() {
         restored_settings_model.read(&app, |model, ctx| {
             assert_eq!(model.default_profile(ctx).data().name, "Settings default");
         });
-        restored_settings_model.update(&mut app, |model, _| model.reset(true));
+        restored_settings_model.update(&mut app, |model, ctx| model.reset(true, ctx));
         restored_settings_model.read(&app, |model, ctx| {
             assert_eq!(model.default_profile(ctx).data().name, "Settings default");
         });

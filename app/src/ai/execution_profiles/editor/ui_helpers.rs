@@ -72,9 +72,8 @@ pub const WORKSPACE_OVERRIDE_TOOLTIP_MESSAGE: &str =
 pub fn render_header_section(
     appearance: &Appearance,
     profile_name_editor: &ViewHandle<EditorView>,
-    is_default_profile: bool,
 ) -> Box<dyn Element> {
-    let mut column = Flex::column()
+    let column = Flex::column()
         .with_child(render_header_title(appearance))
         .with_child(render_header_name_label(appearance))
         .with_child(
@@ -89,14 +88,6 @@ pub fn render_header_section(
             .with_margin_bottom(8.)
             .finish(),
         );
-
-    if is_default_profile {
-        column.add_child(render_info_section(
-            "Default profile name cannot be changed.",
-            None,
-            appearance,
-        ));
-    }
 
     Container::new(column.finish())
         .with_margin_bottom(24.)
