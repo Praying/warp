@@ -257,6 +257,10 @@ pub struct AIExecutionProfilesModel {
     /// Only contains entries for non-default profiles.
     active_profiles_per_session: HashMap<EntityId, ExecutionProfileId>,
     session_computer_use: HashMap<EntityId, SessionComputerUse>,
+    /// User-chosen default profile from `DefaultExecutionProfileId`, cached from
+    /// settings. `None` (or an ID missing from the collection) falls back to the
+    /// built-in default profile.
+    default_profile_id_override: Option<ExecutionProfileId>,
 }
 
 pub(crate) struct SessionComputerUse {
@@ -417,10 +421,14 @@ impl AIExecutionProfilesModel {
         }
 
         if uses_file_backed_profiles {
-            ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, event, ctx| {
-                if matches!(event, AISettingsChangedEvent::ExecutionProfiles { .. }) {
+            ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, event, ctx| match event {
+                AISettingsChangedEvent::ExecutionProfiles { .. } => {
                     me.handle_settings_profiles_changed(ctx);
                 }
+                AISettingsChangedEvent::DefaultExecutionProfileId { .. } => {
+                    me.handle_default_profile_id_changed(ctx);
+                }
+                _ => {}
             });
 
             // Eval builds never import legacy cloud profiles into settings.
@@ -492,7 +500,7 @@ impl AIExecutionProfilesModel {
             let sync_id_of_default_profile = *profile_id_to_sync_id
                 .get(id)
                 .expect("default profile is synced but no sync id found");
-            ctx.subscribe_to_model(&CloudModel::handle(ctx), move |me, _, event, _| {
+            ctx.subscribe_to_model(&CloudModel::handle(ctx), move |me, _, event, ctx| {
                 if let CloudModelEvent::ObjectDeleted {
                     type_and_id:
                         CloudObjectTypeAndId::GenericStringObject {
@@ -506,7 +514,7 @@ impl AIExecutionProfilesModel {
                     log::info!(
                         "Resetting execution profile model because default profile was deleted."
                     );
-                    me.reset(false);
+                    me.reset(false, ctx);
                 }
             });
         }
@@ -524,6 +532,11 @@ impl AIExecutionProfilesModel {
             profile_id_to_sync_id,
             active_profiles_per_session,
             session_computer_use: HashMap::new(),
+            default_profile_id_override: if uses_file_backed_profiles {
+                Self::parse_default_profile_id(ctx)
+            } else {
+                None
+            },
         };
 
         if !uses_file_backed_profiles {
@@ -663,6 +676,26 @@ impl AIExecutionProfilesModel {
             self.settings_migration_state = SettingsMigrationState::PendingExplicitSync;
             self.preserve_profile_onboarding_overrides = true;
         }
+    }
+
+    /// Re-caches the user-chosen default profile and notifies the profiles that
+    /// gained or lost the default designation.
+    fn handle_default_profile_id_changed(&mut self, ctx: &mut ModelContext<Self>) {
+        let previous = self.default_profile_id();
+        self.default_profile_id_override = Self::parse_default_profile_id(ctx);
+        let current = self.default_profile_id();
+        if previous != current {
+            ctx.emit(AIExecutionProfilesModelEvent::ProfileUpdated(previous));
+            ctx.emit(AIExecutionProfilesModelEvent::ProfileUpdated(current));
+        }
+    }
+
+    fn parse_default_profile_id(ctx: &AppContext) -> Option<ExecutionProfileId> {
+        AISettings::as_ref(ctx)
+            .default_execution_profile_id
+            .value()
+            .as_deref()
+            .and_then(ExecutionProfileId::parse)
     }
 
     /// Attempts to make the account's file-backed execution-profile collection authoritative.
@@ -935,7 +968,7 @@ impl AIExecutionProfilesModel {
             return;
         }
         if self.settings_are_authoritative() {
-            if profile_id.is_default() {
+            if *profile_id == self.default_profile_id() {
                 log::warn!("Attempted to delete default profile (id: {profile_id})");
                 return;
             }
@@ -979,8 +1012,33 @@ impl AIExecutionProfilesModel {
         ctx.emit(AIExecutionProfilesModelEvent::ProfileDeleted);
     }
 
+    /// Points the default designation at the given profile, leaving the
+    /// previous default profile untouched.
+    pub fn set_default_profile(
+        &mut self,
+        profile_id: &ExecutionProfileId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !self.settings_are_authoritative() {
+            log::warn!("Setting the default profile is only supported for locally stored profiles");
+            return;
+        }
+        if *profile_id == self.default_profile_id()
+            || self.last_settings_profiles.profile(profile_id).is_none()
+        {
+            return;
+        }
+        if let Err(error) = AISettings::handle(ctx).update(ctx, |settings, ctx| {
+            settings
+                .default_execution_profile_id
+                .set_value(Some(profile_id.as_str().to_string()), ctx)
+        }) {
+            report_error!(error.context("Failed to set the default execution profile"));
+        }
+    }
+
     // On logout, we need to clear any existing profile state.
-    pub fn reset(&mut self, settings_profiles_are_explicit: bool) {
+    pub fn reset(&mut self, settings_profiles_are_explicit: bool, ctx: &AppContext) {
         self.session_computer_use.clear();
         if self.source.is_settings_collection() {
             if self.source.imports_legacy_profiles() {
@@ -998,6 +1056,7 @@ impl AIExecutionProfilesModel {
                 self.profile_id_to_sync_id.clear();
             }
             self.active_profiles_per_session.clear();
+            self.default_profile_id_override = Self::parse_default_profile_id(ctx);
             return;
         }
         self.default_profile_state = DefaultProfileState::Unsynced {
@@ -1009,6 +1068,7 @@ impl AIExecutionProfilesModel {
         };
         self.profile_id_to_sync_id.clear();
         self.active_profiles_per_session.clear();
+        self.default_profile_id_override = None;
     }
 
     /// Returns the active permissions profile for a specific terminal view.
@@ -1028,6 +1088,11 @@ impl AIExecutionProfilesModel {
 
     pub fn default_profile_id(&self) -> ExecutionProfileId {
         if self.settings_are_authoritative() {
+            if let Some(id) = &self.default_profile_id_override
+                && self.last_settings_profiles.profile(id).is_some()
+            {
+                return id.clone();
+            }
             return ExecutionProfileId::default_profile();
         }
         self.default_profile_state.id()
@@ -1035,7 +1100,7 @@ impl AIExecutionProfilesModel {
 
     pub fn default_profile(&self, ctx: &AppContext) -> AIExecutionProfileInfo {
         if self.settings_are_authoritative() {
-            let id = ExecutionProfileId::default_profile();
+            let id = self.default_profile_id();
             let data = AISettings::as_ref(ctx)
                 .execution_profiles
                 .value()

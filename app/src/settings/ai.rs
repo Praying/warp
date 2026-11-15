@@ -1523,6 +1523,18 @@ define_settings_group!(AISettings, settings: [
         toml_path: "agents.execution_profiles",
         max_table_depth: 2,
         description: "AI execution profiles and their permissions.",
+    },
+    // The profile the agent falls back to when a session has no explicit
+    // selection. `None` and unknown IDs fall back to the built-in profile.
+    default_execution_profile_id: DefaultExecutionProfileId {
+        type: Option<String>,
+        default: None,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        surface: settings::SettingSurfaces::ALL,
+        private: false,
+        toml_path: "agents.default_execution_profile_id",
+        description: "The execution profile used when no other profile is selected.",
     }
     // Non-secret custom inference endpoint definitions shared by GUI and TUI.
     // Credentials remain in each surface's secure-storage namespace.

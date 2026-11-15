@@ -311,8 +311,10 @@ pub fn translate(text: &str) -> Option<&'static str> {
         "Continue with Grok" => "使用 Grok 继续",
         "Create" => "创建",
         "Create environment" => "创建环境",
+        "Default" => "默认",
         "Delete" => "删除",
         "Delete environment" => "删除环境",
+        "Delete profile" => "删除配置档案",
         "Disconnect" => "断开连接",
         "Index new folder" => "索引新文件夹",
         "Load more" => "加载更多",
@@ -322,6 +324,7 @@ pub fn translate(text: &str) -> Option<&'static str> {
         "Remove" => "移除",
         "Remove endpoint" => "移除端点",
         "Save" => "保存",
+        "Set as default profile" => "设为默认配置档案",
         "Sign up" => "注册",
 
         // ── Features page: inline hints ──

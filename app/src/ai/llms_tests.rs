@@ -1394,7 +1394,7 @@ fn resetting_profiles_clears_session_computer_use() {
             profiles.set_session_computer_use(terminal_view_id, true, ctx);
         });
 
-        profiles.update(app, |profiles, _| profiles.reset(true));
+        profiles.update(app, |profiles, ctx| profiles.reset(true, ctx));
 
         profiles.read(app, |profiles, _| {
             assert!(profiles.session_computer_use(terminal_view_id).is_none());

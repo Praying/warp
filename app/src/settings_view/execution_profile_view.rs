@@ -142,6 +142,45 @@ impl View for ExecutionProfileView {
                     .clone()
             });
 
+        let is_current_default =
+            self.profile_id == AIExecutionProfilesModel::as_ref(app).default_profile_id();
+
+        let mut title_row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Text::new(profile.display_name(), appearance.ui_font_family(), 14.)
+                    .with_style(Properties::default().weight(Weight::Medium))
+                    .with_color(if is_any_ai_enabled {
+                        appearance.theme().active_ui_text_color().into()
+                    } else {
+                        appearance.theme().disabled_ui_text_color().into()
+                    })
+                    .finish(),
+            );
+        if is_current_default {
+            title_row.add_child(
+                Container::new(
+                    Text::new(
+                        crate::i18n::tr("Default").into_owned(),
+                        appearance.ui_font_family(),
+                        10.,
+                    )
+                    .with_color(appearance.theme().accent().into())
+                    .finish(),
+                )
+                .with_border(
+                    warpui::elements::Border::all(1.).with_border_fill(appearance.theme().accent()),
+                )
+                .with_corner_radius(warpui::elements::CornerRadius::with_all(
+                    warpui::elements::Radius::Pixels(3.),
+                ))
+                .with_horizontal_padding(6.)
+                .with_vertical_padding(1.)
+                .with_margin_left(8.)
+                .finish(),
+            );
+        }
+
         Container::new(
             Flex::column()
                 .with_child(
@@ -149,16 +188,7 @@ impl View for ExecutionProfileView {
                         .with_main_axis_size(MainAxisSize::Max)
                         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
                         .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                        .with_child(
-                            Text::new(profile.display_name(), appearance.ui_font_family(), 14.)
-                                .with_style(Properties::default().weight(Weight::Medium))
-                                .with_color(if is_any_ai_enabled {
-                                    appearance.theme().active_ui_text_color().into()
-                                } else {
-                                    appearance.theme().disabled_ui_text_color().into()
-                                })
-                                .finish(),
-                        )
+                        .with_child(title_row.finish())
                         .with_child(self.edit_button.as_ref(app).render(app))
                         .finish(),
                 )
