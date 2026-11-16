@@ -494,6 +494,112 @@ fn streams_completion_from_an_anthropic_endpoint() {
     assert!((usage.context_window_usage - 0.075).abs() < f32::EPSILON);
 }
 
+#[test]
+fn anthropic_requests_answer_dangling_tool_calls_from_history() {
+    let mut server = mockito::Server::new();
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured_for_matcher = captured.clone();
+    let mock = server
+        .mock("POST", "/v1/messages")
+        .match_request(move |request| {
+            let bytes = request.body().cloned().unwrap_or_default();
+            let body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+            *captured_for_matcher.lock().unwrap() = body;
+            true
+        })
+        .with_header("content-type", "text/event-stream")
+        .with_body(concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Done\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\"}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        ))
+        .create();
+
+    // A tool call was recorded but never answered: the stream failed or the
+    // app restarted before the result arrived, and the user sent a new query.
+    let mut request = anthropic_request(&server.url());
+    request.task_context = Some(api::request::TaskContext {
+        tasks: vec![api::Task {
+            id: "root".to_owned(),
+            messages: vec![
+                message(api::message::Message::UserQuery(api::message::UserQuery {
+                    query: "list the files".to_owned(),
+                    ..Default::default()
+                })),
+                message(api::message::Message::ToolCall(api::message::ToolCall {
+                    tool_call_id: "call-1".to_owned(),
+                    tool: Some(api::message::tool_call::Tool::RunShellCommand(
+                        api::message::tool_call::RunShellCommand {
+                            command: "ls".to_owned(),
+                            ..Default::default()
+                        },
+                    )),
+                })),
+            ],
+            ..Default::default()
+        }],
+    });
+
+    let events: Vec<_> = futures::executor::block_on(async {
+        generate_local_multi_agent_output(&request, None)
+            .then(|event| async move { event })
+            .collect()
+            .await
+    });
+    mock.assert();
+    assert!(events.iter().all(|event| event.is_ok()));
+
+    let body = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("request body captured");
+    let messages = body["messages"].as_array().unwrap();
+    for (index, message) in messages.iter().enumerate() {
+        let Some(blocks) = message["content"].as_array() else {
+            continue;
+        };
+        let tool_use_ids: Vec<&str> = blocks
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .filter_map(|block| block["id"].as_str())
+            .collect();
+        if tool_use_ids.is_empty() {
+            continue;
+        }
+        let next = messages
+            .get(index + 1)
+            .expect("tool_use turn must be followed by a user turn");
+        assert_eq!(next["role"], "user");
+        let result_ids: Vec<&str> = next["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|block| block["type"] == "tool_result")
+            .filter_map(|block| block["tool_use_id"].as_str())
+            .collect();
+        for id in tool_use_ids {
+            assert!(
+                result_ids.contains(&id),
+                "tool_use {id} is not answered by a tool_result in the next message"
+            );
+        }
+    }
+    let answered = messages.iter().any(|message| {
+        message["content"].as_array().is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block["type"] == "tool_result" && block["tool_use_id"] == "call-1")
+        })
+    });
+    assert!(
+        answered,
+        "the dangling tool call must be answered by a synthesized tool_result"
+    );
+}
+
 fn anthropic_request(base_url: &str) -> api::Request {
     let mut request = custom_provider_request("custom-mock");
     request.settings.as_mut().unwrap().custom_model_providers =

@@ -94,6 +94,97 @@ impl ChatMessage {
     }
 }
 
+const INTERRUPTED_TOOL_RESULT: &str = "(interrupted before a result was recorded)";
+
+/// Repairs tool-call pairing in a flattened history so endpoint validation
+/// cannot reject the request: every assistant tool call is answered by a
+/// result in the next user turn, orphan results are dropped, and results
+/// precede user text within the turn. A history can legitimately end
+/// mid-tool-call — a failed stream or a restart after the call was recorded
+/// but before its result arrived — and without this repair every follow-up
+/// request in that conversation fails with a 400.
+pub(super) fn sanitize_tool_pairing(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut sanitized = Vec::with_capacity(messages.len());
+    let mut open_ids: Vec<String> = Vec::new();
+    let mut results: Vec<ChatMessage> = Vec::new();
+    let mut texts: Vec<ChatMessage> = Vec::new();
+    let mut in_assistant_run = false;
+
+    for message in messages {
+        let starts_assistant_run = !in_assistant_run
+            && matches!(
+                &message,
+                ChatMessage::Assistant(_) | ChatMessage::AssistantToolCalls(_)
+            );
+        if starts_assistant_run {
+            flush_user_turn(
+                &mut sanitized,
+                std::mem::take(&mut open_ids),
+                &mut results,
+                &mut texts,
+            );
+        }
+        match message {
+            ChatMessage::User { .. } => {
+                in_assistant_run = false;
+                texts.push(message);
+            }
+            ChatMessage::ToolResult { .. } => {
+                in_assistant_run = false;
+                results.push(message);
+            }
+            ChatMessage::Assistant(_) => {
+                in_assistant_run = true;
+                sanitized.push(message);
+            }
+            ChatMessage::AssistantToolCalls(tool_calls) => {
+                in_assistant_run = true;
+                open_ids.extend(tool_calls.iter().map(|tool_call| tool_call.id.clone()));
+                sanitized.push(ChatMessage::AssistantToolCalls(tool_calls));
+            }
+        }
+    }
+    flush_user_turn(
+        &mut sanitized,
+        std::mem::take(&mut open_ids),
+        &mut results,
+        &mut texts,
+    );
+    sanitized
+}
+
+/// Emits one buffered user turn: the tool results that answer `open_ids`,
+/// with synthesized results for calls the history never answered, followed by
+/// the turn's user text.
+fn flush_user_turn(
+    sanitized: &mut Vec<ChatMessage>,
+    open_ids: Vec<String>,
+    results: &mut Vec<ChatMessage>,
+    texts: &mut Vec<ChatMessage>,
+) {
+    let mut answered_ids = Vec::new();
+    let mut answered = Vec::new();
+    for message in results.drain(..) {
+        let ChatMessage::ToolResult { id, content } = message else {
+            continue;
+        };
+        if open_ids.contains(&id) && !answered_ids.contains(&id) {
+            answered_ids.push(id.clone());
+            answered.push(ChatMessage::tool_result(id, content));
+        }
+    }
+    for id in &open_ids {
+        if !answered_ids.contains(id) {
+            answered.push(ChatMessage::tool_result(
+                id.clone(),
+                INTERRUPTED_TOOL_RESULT,
+            ));
+        }
+    }
+    sanitized.append(&mut answered);
+    sanitized.append(texts);
+}
+
 pub(super) struct ToolCallRequest {
     pub id: String,
     pub name: String,
