@@ -32,6 +32,10 @@ if tool == os.environ.get("FAIL_TOOL"):
     sys.exit(1)
 if tool == "rustc":
     print('target_arch="aarch64"')
+elif tool == "cargo":
+    if "--format" not in args or args[args.index("--format") + 1] != "osx":
+        print("hdiutil: convert failed - Resource temporarily unavailable", file=sys.stderr)
+        sys.exit(1)
 elif tool == "codesign" and "--entitlements" in args:
     with open(args[args.index("--entitlements") + 1], "rb") as source:
         (state / "entitlements.json").write_text(json.dumps(plistlib.load(source)))
@@ -71,7 +75,7 @@ class BundleSigningTests(unittest.TestCase):
         tools = self.root / "bin"
         tools.mkdir()
         for tool in (
-            "rustc", "security", "codesign", "create-dmg", "xcrun", "plutil", "hdiutil", "spctl",
+            "rustc", "cargo", "security", "codesign", "create-dmg", "xcrun", "plutil", "hdiutil", "spctl",
         ):
             executable = tools / tool
             executable.write_text(MOCK_TOOL)
@@ -116,6 +120,31 @@ class BundleSigningTests(unittest.TestCase):
 
     def calls(self):
         return [json.loads(line) for line in (self.root / "calls").read_text().splitlines()]
+
+    def test_cargo_bundle_only_creates_app_before_custom_dmg_packaging(self):
+        build_script = SOURCE.split('if [[ "$ARTIFACT" == "app" ]]; then', 1)[1].split(
+            '  "$WORKSPACE_ROOT_DIR/script/macos/add_framework_rpath"', 1
+        )[0]
+        (self.root / "app").mkdir()
+        self.env.update(
+            DEFAULT_TARGET="aarch64-apple-darwin", RELEASE_CHANNEL="oss",
+            BUNDLE_ID="dev.warp.WarpOss", CARGO_PROFILE="release-lto",
+            WARP_BIN="warp-oss", FEATURES="release_bundle,extern_plist",
+        )
+        for build_binary in ("true", "false"):
+            with self.subTest(build_binary=build_binary):
+                (self.root / "calls").write_text("")
+                self.env["BUILD_BINARY"] = build_binary
+                result = subprocess.run(
+                    ["bash", "-e", "-c", build_script], cwd=self.root, env=self.env,
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.calls(), [[
+                    "cargo", "bundle", "--format", "osx", "--profile", "release-lto",
+                    "--bin", "warp-oss", "--target", "aarch64-apple-darwin",
+                    "--features", "release_bundle,extern_plist",
+                ]])
 
     def run_workflow_step(self, name):
         (self.root / "calls").write_text("")
