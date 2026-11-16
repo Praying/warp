@@ -258,6 +258,7 @@ fn prepare(
     if let Some(context_window) = model.context_window {
         truncate_history(&mut messages, context_window);
     }
+    messages = llm::sanitize_tool_pairing(messages);
     if model.supports_images {
         attach_input_images(&mut messages, input);
     }

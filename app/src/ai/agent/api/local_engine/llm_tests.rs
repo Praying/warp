@@ -254,6 +254,90 @@ fn anthropic_messages_merge_consecutive_same_role_turns() {
 }
 
 #[test]
+fn sanitize_answers_dangling_tool_calls_before_the_next_user_message() {
+    let messages = vec![
+        ChatMessage::user("list the files"),
+        ChatMessage::assistant_tool_calls(vec![tool_call("call-1")]),
+        ChatMessage::user("never mind, describe the directory instead"),
+    ];
+    let turns = anthropic::anthropic_messages(&sanitize_tool_pairing(messages));
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[1]["content"][0]["type"], "tool_use");
+    let blocks = turns[2]["content"].as_array().unwrap();
+    assert_eq!(blocks[0]["type"], "tool_result");
+    assert_eq!(blocks[0]["tool_use_id"], "call-1");
+    assert_eq!(blocks[0]["content"], INTERRUPTED_TOOL_RESULT);
+    assert_eq!(blocks[1]["type"], "text");
+}
+
+#[test]
+fn sanitize_fills_missing_results_for_parallel_tool_calls() {
+    let messages = vec![
+        ChatMessage::user("check both files"),
+        ChatMessage::assistant_tool_calls(vec![tool_call("call-1"), tool_call("call-2")]),
+        ChatMessage::user("and summarize"),
+        ChatMessage::tool_result("call-1", "(exit code 0)\nok"),
+    ];
+    let turns = anthropic::anthropic_messages(&sanitize_tool_pairing(messages));
+    let blocks = turns[2]["content"].as_array().unwrap();
+    assert_eq!(blocks[0]["type"], "tool_result");
+    assert_eq!(blocks[0]["tool_use_id"], "call-1");
+    assert_eq!(blocks[1]["type"], "tool_result");
+    assert_eq!(blocks[1]["tool_use_id"], "call-2");
+    assert_eq!(blocks[1]["content"], INTERRUPTED_TOOL_RESULT);
+    assert_eq!(blocks[2]["type"], "text");
+}
+
+#[test]
+fn sanitize_drops_orphan_tool_results() {
+    let sanitized = sanitize_tool_pairing(vec![
+        ChatMessage::user("hello"),
+        ChatMessage::tool_result("call-1", "lost"),
+        ChatMessage::assistant("hi"),
+    ]);
+    assert_eq!(sanitized.len(), 2);
+    assert!(matches!(sanitized[0], ChatMessage::User { .. }));
+    assert!(matches!(sanitized[1], ChatMessage::Assistant(_)));
+}
+
+#[test]
+fn sanitize_closes_a_history_that_ends_on_tool_calls() {
+    let sanitized = sanitize_tool_pairing(vec![
+        ChatMessage::user("list the files"),
+        ChatMessage::assistant_tool_calls(vec![tool_call("call-1")]),
+    ]);
+    assert!(matches!(
+        sanitized.as_slice(),
+        [
+            ChatMessage::User { .. },
+            ChatMessage::AssistantToolCalls(_),
+            ChatMessage::ToolResult { id, .. },
+        ] if id == "call-1"
+    ));
+}
+
+#[test]
+fn sanitize_leaves_fully_paired_histories_unchanged() {
+    let sanitized = sanitize_tool_pairing(vec![
+        ChatMessage::user("list the files"),
+        ChatMessage::assistant("Checking."),
+        ChatMessage::assistant_tool_calls(vec![tool_call("call-1")]),
+        ChatMessage::tool_result("call-1", "(exit code 0)\nREADME.md"),
+        ChatMessage::assistant("Here is the listing."),
+    ]);
+    assert!(matches!(
+        sanitized.as_slice(),
+        [
+            ChatMessage::User { .. },
+            ChatMessage::Assistant(text),
+            ChatMessage::AssistantToolCalls(_),
+            ChatMessage::ToolResult { id, .. },
+            ChatMessage::Assistant(_),
+        ] if text == "Checking." && id == "call-1"
+    ));
+}
+
+#[test]
 fn gateway_not_found_bodies_are_recognized_and_cleaned() {
     let error = EndpointError {
         status: Some(http::StatusCode::BAD_REQUEST),
@@ -355,5 +439,16 @@ fn llm_model() -> LlmModel {
         context_window: None,
         max_output_tokens: None,
         supports_images: false,
+    }
+}
+
+fn tool_call(id: &str) -> ToolCallRequest {
+    ToolCallRequest {
+        id: id.to_owned(),
+        name: "run_shell_command".to_owned(),
+        arguments: serde_json::json!({"command": "ls"})
+            .as_object()
+            .cloned()
+            .unwrap(),
     }
 }
