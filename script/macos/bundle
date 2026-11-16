@@ -82,6 +82,9 @@ cleanup_codesign_keychain() {
         echo "Cleaning up by deleting $CODESIGN_KEYCHAIN_NAME keychain."
         security delete-keychain "$CODESIGN_KEYCHAIN_NAME" || echo "No keychain to delete or already deleted."
     fi
+    if [[ -n "${CODESIGN_ENTITLEMENTS_DIR:-}" ]]; then
+        rm -r "$CODESIGN_ENTITLEMENTS_DIR"
+    fi
 }
 
 # Set up cleanup trap
@@ -357,6 +360,16 @@ while (( "$#" )); do
 done
 # set positional arguments in their proper place
 eval set -- "$PARAMS"
+
+if [[ $CODESIGN = true && $READ_PASSWORDS_FROM_ENV = true ]]; then
+  for name in WARP_NOTARIZATION_APPLE_ID WARP_NOTARIZATION_PASSWORD WARP_DEVELOPER_ID_CERT \
+    WARP_DEVELOPER_ID_CERT_PASSWORD WARP_CODESIGN_KEYCHAIN_PASSWORD; do
+    if [[ -z "${!name}" ]]; then
+      echo "$name must be set for code signing" >&2
+      exit 1
+    fi
+  done
+fi
 
 # Infer a cargo profile from the bundle configuration.
 if [[ $DEBUG = true ]]; then
@@ -870,27 +883,25 @@ if [[ $READ_PASSWORDS_FROM_ENV != true ]]; then
 fi
 
 if [[ $CODESIGN = true ]]; then
-  # TODO - does this need to change per user?  Seems like it's tied to the WARP_NOTARIZATION_PASSWORD password.
-  APPLE_TEAM_ID="2BBY89MBSN"
+  APPLE_TEAM_ID="${APPLE_TEAM_ID:-2BBY89MBSN}"
   CODESIGN_KEYCHAIN_NAME="warp-codesign-keychain"
+  CODESIGN_ENTITLEMENTS="script/Entitlements.plist"
 
   echo "Starting codesigning..."
 
-  if [[ $READ_PASSWORDS_FROM_ENV = true ]]; then
-    if [ -z "$WARP_NOTARIZATION_PASSWORD" ] ; then
-      echo "WARP_NOTARIZATION_PASSWORD must be set for code signing"
-      exit 1
-    fi
+  if [[ "$APPLE_TEAM_ID" != "2BBY89MBSN" ]]; then
+    CODESIGN_ENTITLEMENTS_DIR="$(mktemp -d)"
+    CODESIGN_ENTITLEMENTS="$CODESIGN_ENTITLEMENTS_DIR/Entitlements.plist"
+    python3 - "$CODESIGN_ENTITLEMENTS" <<'PY'
+import plistlib
+import sys
 
-    if [ -z "$WARP_DEVELOPER_ID_CERT_PASSWORD" ] ; then
-      echo "WARP_DEVELOPER_ID_CERT_PASSWORD must be set for code signing"
-      exit 1
-    fi
-
-    if [ -z "$WARP_CODESIGN_KEYCHAIN_PASSWORD" ] ; then
-      echo "WARP_CODESIGN_KEYCHAIN_PASSWORD must be set for code signing"
-      exit 1
-    fi
+with open("script/Entitlements.plist", "rb") as source:
+    entitlements = plistlib.load(source)
+del entitlements["com.apple.security.application-groups"]
+with open(sys.argv[1], "wb") as destination:
+    plistlib.dump(entitlements, destination)
+PY
   fi
 
   security delete-keychain $CODESIGN_KEYCHAIN_NAME || echo "No existing keychain to clean up".
@@ -929,10 +940,10 @@ elif [[ $CODESIGN = true ]]; then
   if [[ "$ARTIFACT" == app ]]; then
     echo "Codesigning $BUNDLE_DIR/$WARP_APP_NAME.app..."
     # Use --deep so we sign bundled frameworks as well
-    codesign_with_retry --deep -f -o runtime --timestamp -s "$APPLE_TEAM_ID" "$BUNDLE_DIR/$WARP_APP_NAME.app" --entitlements script/Entitlements.plist
+    codesign_with_retry --deep -f -o runtime --timestamp -s "$APPLE_TEAM_ID" "$BUNDLE_DIR/$WARP_APP_NAME.app" --entitlements "$CODESIGN_ENTITLEMENTS"
   elif [[ "$ARTIFACT" == cli || "$ARTIFACT" == warpctrl || "$ARTIFACT" == tui ]]; then
     echo "Codesigning $OUT_DIR/$WARP_BIN..."
-    codesign_with_retry -f -o runtime --timestamp -s "$APPLE_TEAM_ID" "$OUT_DIR/$WARP_BIN" --entitlements script/Entitlements.plist
+    codesign_with_retry -f -o runtime --timestamp -s "$APPLE_TEAM_ID" "$OUT_DIR/$WARP_BIN" --entitlements "$CODESIGN_ENTITLEMENTS"
 
     # Create the .zip for notarization in a separate location - otherwise, Apple's codesigning
     # tools decide that it's a sealed resource that belongs to the binary and needs to also be signed.

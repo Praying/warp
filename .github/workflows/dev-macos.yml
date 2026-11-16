@@ -27,11 +27,46 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: 1
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Select signing mode
+        id: signing
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WARP_DEVELOPER_ID_CERT: ${{ secrets.WARP_DEVELOPER_ID_CERT }}
+          WARP_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.WARP_DEVELOPER_ID_CERT_PASSWORD }}
+          WARP_NOTARIZATION_APPLE_ID: ${{ secrets.WARP_NOTARIZATION_APPLE_ID }}
+          WARP_NOTARIZATION_PASSWORD: ${{ secrets.WARP_NOTARIZATION_PASSWORD }}
+        run: |
+          credentials=(APPLE_TEAM_ID WARP_DEVELOPER_ID_CERT WARP_DEVELOPER_ID_CERT_PASSWORD
+            WARP_NOTARIZATION_APPLE_ID WARP_NOTARIZATION_PASSWORD)
+          configured=0
+          for name in "${credentials[@]}"; do
+            if [[ -n "${!name}" ]]; then
+              configured=$((configured + 1))
+            fi
+          done
+          if (( configured == 0 )); then
+            mode=unnotarized
+            echo "::warning::Building a self-signed, unnotarized installer. First launch requires manual approval in macOS Privacy & Security."
+          elif (( configured == ${#credentials[@]} )); then
+            mode=notarized
+          else
+            echo "::error::Signing credentials are incomplete. Configure all five secrets or remove all of them to build without notarization; see .github/workflows/dev-macos.md."
+            exit 1
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "### macOS installer: $mode" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$mode" == unnotarized ]]; then
+            echo "This build is self-signed and not notarized by Apple. After copying WarpOss to Applications and attempting to open it, use System Settings → Privacy & Security → Open Anyway only if you trust this build. Do not disable Gatekeeper globally." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Checkout sources and bundled assets
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           lfs: true
           persist-credentials: false
+
+      - name: Test signing pipeline
+        run: python3 script/macos/test_bundle_signing.py
 
       - name: Install repository Rust toolchain
         run: |
@@ -50,25 +85,50 @@ jobs:
           ./script/install_cargo_bundle
           ./script/install_cargo_release_deps --no-build-deps
 
-      - name: Build self-signed OSS installer
+      - name: Build OSS installer
         id: bundle
+        env:
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WARP_DEVELOPER_ID_CERT: ${{ secrets.WARP_DEVELOPER_ID_CERT }}
+          WARP_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.WARP_DEVELOPER_ID_CERT_PASSWORD }}
+          WARP_NOTARIZATION_APPLE_ID: ${{ secrets.WARP_NOTARIZATION_APPLE_ID }}
+          WARP_NOTARIZATION_PASSWORD: ${{ secrets.WARP_NOTARIZATION_PASSWORD }}
         run: |
+          signing_args=(--selfsign)
+          if [[ "$SIGNING_MODE" == notarized ]]; then
+            WARP_CODESIGN_KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+            echo "::add-mask::$WARP_CODESIGN_KEYCHAIN_PASSWORD"
+            export WARP_CODESIGN_KEYCHAIN_PASSWORD
+            signing_args=(--read-passwords-from-env)
+          fi
           ./script/macos/bundle --channel oss --arch aarch64 \
-            --selfsign --dmg-name-suffix "dev-aarch64-${GITHUB_SHA:0:8}"
+            "${signing_args[@]}" --dmg-name-suffix "dev-aarch64-${GITHUB_SHA:0:8}-$SIGNING_MODE"
 
       - name: Verify and checksum installer
         env:
           DMG_PATH: ${{ steps.bundle.outputs.dmg_path }}
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
         run: |
           test -s "$DMG_PATH"
           hdiutil verify "$DMG_PATH"
+          mount_dir="$(mktemp -d)"
+          trap 'hdiutil detach "$mount_dir"; rmdir "$mount_dir"' EXIT
+          hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$mount_dir"
+          codesign --verify --deep --strict --verbose=2 "$mount_dir/WarpOss.app"
+          if [[ "$SIGNING_MODE" == notarized ]]; then
+            codesign --verify --strict --verbose=2 "$DMG_PATH"
+            xcrun stapler validate "$DMG_PATH"
+            spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
+            spctl --assess --type execute --verbose=2 "$mount_dir/WarpOss.app"
+          fi
           cd "$(dirname "$DMG_PATH")"
           shasum -a 256 "$(basename "$DMG_PATH")" > "$(basename "$DMG_PATH").sha256"
 
       - name: Upload installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: WarpOss-dev-macos-aarch64-${{ github.sha }}
+          name: WarpOss-dev-macos-aarch64-${{ steps.signing.outputs.mode }}-${{ github.sha }}
           path: |
             ${{ steps.bundle.outputs.dmg_path }}
             ${{ steps.bundle.outputs.dmg_path }}.sha256
