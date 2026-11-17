@@ -95,7 +95,7 @@ jobs:
           WARP_NOTARIZATION_APPLE_ID: ${{ secrets.WARP_NOTARIZATION_APPLE_ID }}
           WARP_NOTARIZATION_PASSWORD: ${{ secrets.WARP_NOTARIZATION_PASSWORD }}
         run: |
-          signing_args=(--selfsign)
+          signing_args=(--adhoc-sign)
           if [[ "$SIGNING_MODE" == notarized ]]; then
             WARP_CODESIGN_KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
             echo "::add-mask::$WARP_CODESIGN_KEYCHAIN_PASSWORD"
