@@ -223,6 +223,7 @@ DEBUG=false
 ARTIFACT="app"
 CODESIGN=true
 SELFSIGN=false
+ADHOC_SIGN=false
 OPEN_AFTER_BUNDLE=false
 READ_PASSWORDS_FROM_ENV=false
 
@@ -252,6 +253,7 @@ while (( "$#" )); do
       echo "Skipping code signing."
       CODESIGN=false
       SELFSIGN=false
+      ADHOC_SIGN=false
       shift
       ;;
     # Sign with a local Apple Development cert instead of the official Warp cert.
@@ -261,6 +263,14 @@ while (( "$#" )); do
       echo "Self-signing enabled."
       CODESIGN=false
       SELFSIGN=true
+      ADHOC_SIGN=false
+      shift
+      ;;
+    --adhoc-sign)
+      echo "Ad-hoc signing enabled."
+      CODESIGN=false
+      SELFSIGN=false
+      ADHOC_SIGN=true
       shift
       ;;
     # Build only for the default target architecture instead of universal binary
@@ -921,7 +931,11 @@ fi
 ## Step 3: Codesign the app ##
 ##############################
 
-if [[ $SELFSIGN = true ]]; then
+if [[ $ADHOC_SIGN = true ]]; then
+  if [[ "$ARTIFACT" == app ]]; then
+    codesign --force --deep -s - "$BUNDLE_DIR/$WARP_APP_NAME.app"
+  fi
+elif [[ $SELFSIGN = true ]]; then
   SIGNING_CERT="$(security find-identity -p codesigning -v | grep "Apple Development" | awk '{print $2}' | head -1)"
   if [[ -z "$SIGNING_CERT" ]]; then
     echo "No Apple Development cert found, falling back to ad-hoc signing."

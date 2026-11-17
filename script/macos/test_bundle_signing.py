@@ -146,6 +146,23 @@ class BundleSigningTests(unittest.TestCase):
                     "--features", "release_bundle,extern_plist",
                 ]])
 
+    def test_adhoc_sign_uses_requested_command_without_developer_identity(self):
+        signing_script = SOURCE.split("## Step 3: Codesign the app ##", 1)[1].split(
+            "## Step 4: Create DMG ##", 1
+        )[0]
+        self.env.update(
+            ADHOC_SIGN="true", SELFSIGN="false", CODESIGN="false", ARTIFACT="app",
+            BUNDLE_DIR=str(self.bundle_dir), WARP_APP_NAME="WarpOss",
+        )
+        result = subprocess.run(
+            ["bash", "-e", "-c", signing_script], cwd=WORKSPACE, env=self.env,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [[
+            "codesign", "--force", "--deep", "-s", "-", str(self.bundle_dir / "WarpOss.app"),
+        ]])
+
     def run_workflow_step(self, name):
         (self.root / "calls").write_text("")
         return subprocess.run(
@@ -193,7 +210,7 @@ class BundleSigningTests(unittest.TestCase):
                     self.assertEqual(result.returncode, exit_code, result.stderr)
                     calls = self.calls()
                     self.assertEqual(len(calls), 1)
-                    self.assertEqual("--selfsign" in calls[0], mode == "unnotarized")
+                    self.assertEqual("--adhoc-sign" in calls[0], mode == "unnotarized")
                     self.assertEqual("--read-passwords-from-env" in calls[0], mode == "notarized")
                     self.assertIn(f"dev-aarch64-01234567-{mode}", calls[0])
                     self.assertEqual(
